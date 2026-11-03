@@ -10,7 +10,7 @@
 ./启动前端.sh
 ```
 
-脚本自动识别当前电脑已有的 Node 与 pnpm，也可按下面的标准方式启动。
+脚本会检查 Node 版本；如果系统 Node 低于项目要求，会自动使用当前电脑的 Codex 内置兼容运行时，并让 pnpm / Vite 使用同一个 Node。脚本启动时会打印实际使用的版本和路径，不修改系统 Node 或全局环境配置。也可按下面的标准方式启动。
 
 推荐 Node.js 22.12+，使用 pnpm（已提供锁文件）：
 
@@ -27,7 +27,7 @@ pnpm build
 pnpm preview
 ```
 
-当前 Codex 桌面环境未在 PATH 提供 Node，可使用已安装的运行时：
+如果手动执行 pnpm 时仍使用系统的 Node 18，可仅在当前终端切换到已有的兼容运行时：
 
 ```bash
 export PATH=/home/zns/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH
