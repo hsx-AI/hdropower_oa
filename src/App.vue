@@ -184,7 +184,7 @@ watch(
         <RouterView />
         <footer class="app-footer">
           <span>水电分厂综合管理平台 <span class="footer-dot">·</span> 让生产协同更高效</span
-          ><span>前端演示环境 <i class="device-dot idle" /> 本地数据</span>
+          ><span>{{ route.path.startsWith('/notices') ? '通知单 · 数据库查询' : '其他业务 · 演示数据' }}</span>
         </footer>
       </main></template
     ><RouterView v-else /><Transition name="toast"

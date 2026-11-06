@@ -1,381 +1,58 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { ref, reactive, watch, computed, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
-import Icon from '../components/Icon.vue';
-import StatusBadge from '../components/StatusBadge.vue';
-import MetricCard from '../components/MetricCard.vue';
-import { state, downloadCsv, toast } from '../stores/platform';
-import { teams } from '../data/seed';
+import ApiAccess from '../components/ApiAccess.vue';
+import { api, connected, fields, type NoticeRow } from '../api';
 const route = useRoute();
-const blank = () => ({
-  q: String(route.query.q || ''),
-  status: '',
-  type: '',
-  team: '',
-  device: '',
-  start: '',
-  end: '',
-});
-const filter = reactive(blank()),
-  applied = ref(blank()),
-  tab = ref('all'),
-  page = ref(1),
-  size = ref(10);
-const filtered = computed(() =>
-  state.notices.filter((n) => {
-    const f = applied.value;
-    return (
-      (!f.q || `${n.id} ${n.title} ${n.device}`.toLowerCase().includes(f.q.toLowerCase())) &&
-      (!f.status || n.status === f.status) &&
-      (!f.type || n.type === f.type) &&
-      (!f.team || n.team === f.team) &&
-      (!f.device || n.device === f.device) &&
-      (!f.start || n.issued.slice(0, 10) >= f.start) &&
-      (!f.end || n.issued.slice(0, 10) <= f.end) &&
-      (tab.value !== 'followed' || n.followed) &&
-      (tab.value !== 'pending' || n.status !== '已完成')
-    );
-  }),
-);
-watch(
-  () => route.query.q,
-  (q) => {
-    filter.q = String(q || '');
-    tab.value = 'all';
-    search();
-  },
-);
-const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / size.value)));
-const rows = computed(() =>
-  filtered.value.slice((page.value - 1) * size.value, page.value * size.value),
-);
+const filter = reactive({ q: String(route.query.q || ''), field: 'all', start: '', end: '' });
+const applied = ref({ ...filter }), page = ref(1), size = ref(50), total = ref(0);
+const rows = ref<NoticeRow[]>([]), loading = ref(false), error = ref(''), syncInfo = ref('');
+let request: AbortController | undefined;
+const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
+const buttons = computed(() => Array.from({length: Math.min(7, pages.value)}, (_, i) => Math.max(1, Math.min(page.value - 3, pages.value - 6)) + i));
+async function load() {
+  if (!connected.value) return;
+  request?.abort(); const current = new AbortController(); request = current;
+  loading.value = true; error.value = ''; rows.value = [];
+  const params = new URLSearchParams({page: String(page.value), size: String(size.value)});
+  Object.entries(applied.value).forEach(([k,v]) => { if(v) params.set(k,v); });
+  try { const result = await api<{items: NoticeRow[]; total: number}>('/notices?' + params, current.signal);
+    if(request === current) { rows.value = result.items; total.value = result.total; }
+  } catch(e) { if(!current.signal.aborted) error.value = e instanceof Error ? e.message : '读取失败'; }
+  finally { if(request === current) loading.value = false; }
+}
+async function syncStatus() {
+  if (!connected.value) return;
+  try { const s = await api<{runs: {status: string; started_at: string}[]; months: {month: string}[]}>('/sync/status');
+    const run = s.runs[0]; const names: Record<string,string> = {success:'完成',running:'进行中',partial_failure:'部分月份失败',interrupted:'中断'};
+    syncInfo.value = `已采集 ${s.months.length} 个月` + (run ? ` · 最近同步${names[run.status] || run.status}（${new Date(run.started_at).toLocaleString('zh-CN')}）` : ' · 尚无自动同步记录');
+  } catch { syncInfo.value = '同步状态暂不可用'; }
+}
 function search() {
-  if (filter.start && filter.end && filter.start > filter.end) {
-    toast('开始日期不能晚于结束日期', 'error');
-    return;
-  }
-  applied.value = { ...filter };
-  page.value = 1;
+  if (filter.start && filter.end && filter.start > filter.end) { error.value = '开始日期不能晚于结束日期'; return; }
+  applied.value = {...filter}; if(page.value === 1) void load(); else page.value = 1;
 }
-function reset() {
-  Object.assign(filter, { q: '', status: '', type: '', team: '', device: '', start: '', end: '' });
-  search();
-}
-function exportData() {
-  downloadCsv(
-    '技术通知单.csv',
-    ['通知单编号', '标题', '类型', '设备', '责任班组', '下发时间', '截止时间', '状态', '进度'],
-    filtered.value.map((n) => [
-      n.id,
-      n.title,
-      n.type,
-      n.device,
-      n.team,
-      n.issued,
-      n.deadline,
-      n.status,
-      n.progress + '%',
-    ]),
-  );
-  toast('已导出当前筛选结果');
-}
+function reset() { Object.assign(filter, {q:'',field:'all',start:'',end:''}); search(); }
+watch([page,size,connected], () => { void load(); void syncStatus(); }, {immediate:true});
+watch(() => route.query.q, q => {filter.q = String(q || ''); search();});
+onBeforeUnmount(() => request?.abort());
 </script>
 <template>
-  <div class="page-heading">
-    <div>
-      <h1>技术通知单</h1>
-      <p>统一检索技术要求，透明跟踪执行进度。</p>
-    </div>
-    <div class="heading-actions">
-      <span class="heading-note"><Icon name="database" :size="12" />X5 信息只读 · 演示数据</span
-      ><button class="btn" @click="exportData"><Icon name="download" :size="15" />导出列表</button>
-    </div>
-  </div>
-  <div class="metrics-grid">
-    <MetricCard
-      label="通知单总数"
-      :value="state.notices.length"
-      unit="条"
-      icon="file"
-      hint="已同步至平台的通知单"
-    /><MetricCard
-      label="待接收"
-      :value="state.notices.filter((n) => n.status === '待接收').length"
-      unit="条"
-      icon="clock"
-      tone="orange"
-      hint="等待责任班组确认"
-    /><MetricCard
-      label="处理中"
-      :value="state.notices.filter((n) => n.status === '处理中').length"
-      unit="条"
-      icon="cog"
-      tone="green"
-      hint="正在跟踪执行"
-    /><MetricCard
-      label="即将到期"
-      :value="state.notices.filter((n) => n.status === '即将到期').length"
-      unit="条"
-      icon="alert"
-      tone="red"
-      hint="请关注截止时间"
-    />
-  </div>
-  <form class="toolbar" @submit.prevent="search">
-    <div class="filter-grid">
-      <div class="filter-field grow">
-        <label>关键词检索</label>
-        <div class="search-input">
-          <Icon name="search" :size="16" /><input
-            v-model.trim="filter.q"
-            placeholder="搜索编号、标题、设备或关键词"
-            aria-label="通知单关键词"
-          />
-        </div>
-      </div>
-      <div class="filter-field">
-        <label for="notice-status">通知单状态</label
-        ><select id="notice-status" v-model="filter.status">
-          <option value="">全部状态</option>
-          <option>待接收</option>
-          <option>处理中</option>
-          <option>即将到期</option>
-          <option>已完成</option>
-        </select>
-      </div>
-      <div class="filter-field">
-        <label for="notice-type">通知单类型</label
-        ><select id="notice-type" v-model="filter.type">
-          <option value="">全部类型</option>
-          <option
-            v-for="t in ['设备维修', '故障处理', '计划检修', '工艺改进', '技术改进']"
-            :key="t"
-          >
-            {{ t }}
-          </option>
-        </select>
-      </div>
-      <div class="filter-field">
-        <label for="notice-team">责任班组</label
-        ><select id="notice-team" v-model="filter.team">
-          <option value="">全部班组</option>
-          <option v-for="t in teams" :key="t">{{ t }}</option>
-        </select>
-      </div>
-      <div class="filter-field">
-        <label for="notice-device">关联设备</label
-        ><select id="notice-device" v-model="filter.device">
-          <option value="">全部设备</option>
-          <option v-for="d in state.devices" :key="d.id">{{ d.id }}</option>
-        </select>
-      </div>
-    </div>
-    <div class="notice-filter-bottom">
-      <span class="filter-date-label">下发日期</span
-      ><input v-model="filter.start" type="date" aria-label="下发开始日期" /><span class="muted"
-        >—</span
-      ><input v-model="filter.end" type="date" aria-label="下发结束日期" />
-      <div class="filter-actions">
-        <button type="submit" class="btn primary"><Icon name="search" :size="14" />查询</button
-        ><button type="button" class="btn" @click="reset">
-          <Icon name="refresh" :size="14" />重置
-        </button>
-      </div>
-    </div>
-  </form>
-  <section class="panel">
-    <div class="table-panel-top">
-      <div class="table-tabs">
-        <button
-          :class="{ active: tab === 'all' }"
-          @click="
-            tab = 'all';
-            page = 1;
-          "
-        >
-          全部通知单 <small>{{ state.notices.length }}</small></button
-        ><button
-          :class="{ active: tab === 'pending' }"
-          @click="
-            tab = 'pending';
-            page = 1;
-          "
-        >
-          待跟踪</button
-        ><button
-          :class="{ active: tab === 'followed' }"
-          @click="
-            tab = 'followed';
-            page = 1;
-          "
-        >
-          我的关注 <small>{{ state.notices.filter((n) => n.followed).length }}</small>
-        </button>
-      </div>
-      <span class="muted" style="font-size: 10px"
-        >共检索到 <b class="text-blue">{{ filtered.length }}</b> 条结果</span
-      >
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th style="width: 28px"></th>
-            <th>通知单编号 / 标题</th>
-            <th>类型</th>
-            <th>关联设备</th>
-            <th>责任班组</th>
-            <th>执行进度</th>
-            <th>截止时间</th>
-            <th>状态</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="n in rows" :key="n.id">
-            <td style="padding-right: 0">
-              <button
-                class="follow-button"
-                :class="{ followed: n.followed }"
-                :aria-label="(n.followed ? '取消关注' : '关注') + n.title"
-                @click="n.followed = !n.followed"
-              >
-                <Icon name="star" :size="14" />
-              </button>
-            </td>
-            <td>
-              <RouterLink :to="'/notices/' + n.id" class="table-title notice-link">{{
-                n.title
-              }}</RouterLink>
-              <div class="table-id" style="margin-top: 6px">{{ n.id }}</div>
-            </td>
-            <td><StatusBadge :value="n.type" /></td>
-            <td>{{ n.device }}</td>
-            <td>{{ n.team }}</td>
-            <td>
-              <div class="progress-display">
-                <div class="progress" :class="{ green: n.progress === 100 }">
-                  <span :style="{ width: n.progress + '%' }" />
-                </div>
-                {{ n.progress }}%
-              </div>
-            </td>
-            <td>{{ n.deadline.slice(5, 10) }} <small class="muted">18:00</small></td>
-            <td><StatusBadge :value="n.status" dot /></td>
-            <td>
-              <RouterLink class="text-button" :to="'/notices/' + n.id"
-                >查看详情 <Icon name="right" :size="12"
-              /></RouterLink>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <div v-if="!rows.length" class="empty-state">
-        <Icon name="search" :size="34" />
-        <p>没有找到符合条件的通知单</p>
-        <button class="btn small" @click="reset">清空筛选条件</button>
-      </div>
-    </div>
-    <div class="pagination">
-      <span>共 {{ filtered.length }} 条记录</span>
-      <div class="page-buttons">
-        <select v-model="size" aria-label="每页条数" @change="page = 1">
-          <option :value="5">5 条 / 页</option>
-          <option :value="10">10 条 / 页</option>
-          <option :value="20">20 条 / 页</option></select
-        ><button :disabled="page === 1" aria-label="上一页" @click="page--">
-          <Icon name="left" :size="14" /></button
-        ><button v-for="p in pages" :key="p" :class="{ active: page === p }" @click="page = p">
-          {{ p }}</button
-        ><button :disabled="page === pages" aria-label="下一页" @click="page++">
-          <Icon name="right" :size="14" />
-        </button>
-      </div>
-    </div>
-  </section>
-  <div class="notice-source-note">
-    <Icon name="shield" :size="13" />技术通知单源信息来自
-    X5，本平台用于查询与本地执行跟踪；当前未连接真实系统。
-  </div>
+  <ApiAccess><div class="page-heading"><div><h1>技术通知单</h1><p>查阅源通知单，按编号、内容、人员和部门检索。</p></div><span class="heading-note">X5 每小时同步</span></div>
+  <div class="panel notice-summary">{{ syncInfo }}<button class="btn small" @click="load(); syncStatus()">刷新</button></div>
+  <form class="toolbar" @submit.prevent="search"><div class="filter-grid">
+    <div class="filter-field"><label>搜索字段</label><select v-model="filter.field"><option v-for="f in fields" :key="f[0]" :value="f[0]">{{f[1]}}</option></select></div>
+    <div class="filter-field grow"><label>关键词</label><input v-model.trim="filter.q" maxlength="200" placeholder="输入文字进行包含匹配" aria-label="通知单关键词" /></div>
+    <div class="filter-field"><label>生效开始日期</label><input type="date" v-model="filter.start" /></div>
+    <div class="filter-field"><label>生效结束日期</label><input type="date" v-model="filter.end" /></div>
+  </div><div class="actions"><button class="btn primary">查询</button><button type="button" class="btn" @click="reset">重置</button></div></form>
+  <p v-if="error" class="panel notice-summary" role="alert">{{error}} <button class="btn" @click="load">重试</button></p>
+  <section class="panel"><div class="table-panel-top">共 {{total.toLocaleString()}} 条通知单</div>
+    <div v-if="loading" class="empty-state" role="status">正在查询…</div>
+    <div v-else class="table-wrap"><table><thead><tr><th>表单编号</th><th>类别</th><th>提出部门</th><th>创建人员</th><th>生效时间</th><th>操作</th></tr></thead>
+    <tbody><tr v-for="n in rows" :key="n.id"><td><RouterLink class="table-title" :to="'/notices/' + encodeURIComponent(n.id)">{{n.code || n.id}}</RouterLink></td><td>{{n.kind || '—'}}</td><td>{{n.department || '—'}}</td><td>{{n.creator || '—'}}</td><td>{{n.execution_time.replace('T',' ')}}</td><td><RouterLink :to="'/notices/' + encodeURIComponent(n.id)">查看详情</RouterLink></td></tr></tbody></table>
+    <div v-if="!rows.length && !error" class="empty-state">没有符合条件的通知单</div></div>
+    <div class="pagination"><span>第 {{page}} / {{pages}} 页</span><div class="page-buttons"><select v-model="size" @change="page=1"><option :value="20">20条/页</option><option :value="50">50条/页</option><option :value="100">100条/页</option></select><button :disabled="page<=1 || loading" @click="page--">上一页</button><button v-for="p in buttons" :key="p" :class="{active:page===p}" @click="page=p">{{p}}</button><button :disabled="page>=pages || loading" @click="page++">下一页</button></div></div>
+  </section></ApiAccess>
 </template>
-<style scoped>
-.notice-filter-bottom {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-top: 1px solid #f0f3f7;
-  margin-top: 16px;
-  padding-top: 14px;
-}
-.notice-filter-bottom input {
-  padding: 7px 9px;
-  font-size: 11px;
-  color: #7e91ac;
-}
-.notice-filter-bottom .filter-actions {
-  margin-left: auto;
-}
-.filter-date-label {
-  font-size: 11px;
-  color: #8b9bb0;
-  margin-right: 3px;
-}
-.table-tabs small {
-  background: #edf4ff;
-  color: #6095d8;
-  padding: 1px 5px;
-  font-size: 9px;
-  border-radius: 3px;
-  margin-left: 3px;
-}
-.follow-button {
-  border: 0;
-  background: none;
-  color: #d2dce8;
-  padding: 3px;
-  display: flex;
-}
-.follow-button.followed {
-  color: #efb347;
-}
-.follow-button.followed :deep(svg) {
-  fill: #fff3ce;
-}
-.notice-link {
-  font-size: 12px;
-}
-.notice-link:hover {
-  color: var(--blue);
-}
-.notice-source-note {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  font-size: 10px;
-  color: #a0adbf;
-  padding: 17px 5px;
-  line-height: 1.8;
-}
-@media (max-width: 760px) {
-  .notice-filter-bottom {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .notice-filter-bottom input {
-    max-width: 130px;
-  }
-  .filter-date-label {
-    width: 100%;
-  }
-  .notice-filter-bottom .filter-actions {
-    margin-left: 0;
-    width: 100%;
-    margin-top: 4px;
-  }
-  .notice-source-note {
-    font-size: 9px;
-    align-items: flex-start;
-  }
-}
-</style>
+<style scoped>.notice-summary{padding:16px;display:flex;justify-content:space-between;margin-bottom:18px}.actions{display:flex;gap:12px;margin-top:18px}input,select{padding:9px;min-width:0}td{max-width:350px;overflow-wrap:anywhere}</style>

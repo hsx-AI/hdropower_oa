@@ -3,3 +3,13 @@ dist/
 *.local
 .DS_Store
 .test-results/
+
+.venv/
+.env
+work/
+__pycache__/
+*.pyc
+backend/env.local.ps1
+backend/x5-private/
+private-data/
+backend/x5-sync-logs/
