@@ -4,7 +4,9 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, text, select
 from fastapi.testclient import TestClient
-from backend.db import initialize, Notice
+from backend.db import initialize, Notice, User
+from backend.auth import hash_password
+from sqlalchemy.orm import Session
 from backend.sync import store_month, cycle, normalize
 
 def test_x5_wall_clock_month_end():
@@ -25,6 +27,9 @@ def database(monkeypatch):
     url = admin.url.set(database=name)
     engine = create_engine(url, hide_parameters=True)
     initialize(engine)
+    with Session(engine) as db:
+        db.add(User(username='test',display_name='测试员',role='admin',password_hash=hash_password('test-password')))
+        db.commit()
     monkeypatch.setenv('DATABASE_URL', url.render_as_string(hide_password=False))
     monkeypatch.setenv('OA_USER', 'test')
     monkeypatch.setenv('OA_PASSWORD', 'test-password')
@@ -55,7 +60,7 @@ def test_api_search_pagination_auth_detail(database):
     store_month(database, '2026-10', [record(), record('B', '<script>alert(1)</script>不同内容')])
     with TestClient(app) as client:
         assert client.get('/api/notices').status_code == 401
-        client.auth = ('test', 'test-password')
+        assert client.post('/api/auth/login', json={'username':'test','password':'test-password'}).status_code == 200
         assert client.get('/api/notices?q=100%25_').json()['total'] == 1
         assert client.get('/api/notices?q=测试员&field=fCreatePerson').json()['total'] == 2
         assert client.get('/api/notices?size=1&page=2').json()['items'][0]['id'] == 'B'

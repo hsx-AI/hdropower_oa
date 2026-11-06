@@ -1,58 +1,195 @@
 <script setup lang="ts">
 import { ref, reactive, watch, computed, onBeforeUnmount } from 'vue';
-import { useRoute } from 'vue-router';
-import ApiAccess from '../components/ApiAccess.vue';
-import { api, connected, fields, type NoticeRow } from '../api';
-const route = useRoute();
-const filter = reactive({ q: String(route.query.q || ''), field: 'all', start: '', end: '' });
-const applied = ref({ ...filter }), page = ref(1), size = ref(50), total = ref(0);
-const rows = ref<NoticeRow[]>([]), loading = ref(false), error = ref(''), syncInfo = ref('');
-let request: AbortController | undefined;
-const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)));
-const buttons = computed(() => Array.from({length: Math.min(7, pages.value)}, (_, i) => Math.max(1, Math.min(page.value - 3, pages.value - 6)) + i));
-async function load() {
-  if (!connected.value) return;
-  request?.abort(); const current = new AbortController(); request = current;
-  loading.value = true; error.value = ''; rows.value = [];
-  const params = new URLSearchParams({page: String(page.value), size: String(size.value)});
-  Object.entries(applied.value).forEach(([k,v]) => { if(v) params.set(k,v); });
-  try { const result = await api<{items: NoticeRow[]; total: number}>('/notices?' + params, current.signal);
-    if(request === current) { rows.value = result.items; total.value = result.total; }
-  } catch(e) { if(!current.signal.aborted) error.value = e instanceof Error ? e.message : '读取失败'; }
-  finally { if(request === current) loading.value = false; }
+import { useRoute, useRouter } from 'vue-router';
+import { api, fields, type NoticeRow } from '../api';
+import HighlightText from '../components/HighlightText.vue';
+const route = useRoute(),
+  router = useRouter();
+const filter = reactive({ q: '', field: 'all', start: '', end: '' });
+const rows = ref<NoticeRow[]>([]),
+  total = ref(0),
+  loading = ref(false),
+  error = ref(''),
+  advanced = ref(false);
+const page = computed(() => Math.max(1, Number(route.query.page) || 1));
+const pages = computed(() => Math.max(1, Math.ceil(total.value / 20)));
+const applied = computed(() => String(route.query.q || ''));
+let controller: AbortController | undefined;
+function label(key: string) {
+  return fields.find((f) => f[0] === key)?.[1] || '其他信息';
 }
-async function syncStatus() {
-  if (!connected.value) return;
-  try { const s = await api<{runs: {status: string; started_at: string}[]; months: {month: string}[]}>('/sync/status');
-    const run = s.runs[0]; const names: Record<string,string> = {success:'完成',running:'进行中',partial_failure:'部分月份失败',interrupted:'中断'};
-    syncInfo.value = `已采集 ${s.months.length} 个月` + (run ? ` · 最近同步${names[run.status] || run.status}（${new Date(run.started_at).toLocaleString('zh-CN')}）` : ' · 尚无自动同步记录');
-  } catch { syncInfo.value = '同步状态暂不可用'; }
+async function load() {
+  Object.assign(filter, {
+    q: String(route.query.q || ''),
+    field: String(route.query.field || 'all'),
+    start: String(route.query.start || ''),
+    end: String(route.query.end || ''),
+  });
+  if (filter.start || filter.end || filter.field !== 'all') advanced.value = true;
+  controller?.abort();
+  const current = new AbortController();
+  controller = current;
+  loading.value = true;
+  error.value = '';
+  const params = new URLSearchParams({ page: String(page.value), size: '20' });
+  Object.entries(filter).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  try {
+    const data = await api<{ items: NoticeRow[]; total: number }>(
+      '/notices?' + params,
+      current.signal,
+    );
+    if (controller === current) {
+      rows.value = data.items;
+      total.value = data.total;
+    }
+  } catch (e) {
+    if (!current.signal.aborted) {
+      rows.value = [];
+      error.value = e instanceof Error ? e.message : '查询失败';
+    }
+  } finally {
+    if (controller === current) loading.value = false;
+  }
 }
 function search() {
-  if (filter.start && filter.end && filter.start > filter.end) { error.value = '开始日期不能晚于结束日期'; return; }
-  applied.value = {...filter}; if(page.value === 1) void load(); else page.value = 1;
+  if (filter.start && filter.end && filter.start > filter.end) {
+    error.value = '开始日期不能晚于结束日期';
+    return;
+  }
+  const query = Object.fromEntries(Object.entries(filter).filter(([, v]) => v));
+  if (JSON.stringify(route.query) === JSON.stringify(query)) void load();
+  else void router.push({ path: '/notices', query });
 }
-function reset() { Object.assign(filter, {q:'',field:'all',start:'',end:''}); search(); }
-watch([page,size,connected], () => { void load(); void syncStatus(); }, {immediate:true});
-watch(() => route.query.q, q => {filter.q = String(q || ''); search();});
-onBeforeUnmount(() => request?.abort());
+function reset() {
+  Object.assign(filter, { q: '', field: 'all', start: '', end: '' });
+  search();
+}
+function go(p: number) {
+  void router.push({ query: { ...route.query, page: String(p) } });
+}
+watch(() => route.fullPath, load, { immediate: true });
+onBeforeUnmount(() => controller?.abort());
 </script>
 <template>
-  <ApiAccess><div class="page-heading"><div><h1>技术通知单</h1><p>查阅源通知单，按编号、内容、人员和部门检索。</p></div><span class="heading-note">X5 每小时同步</span></div>
-  <div class="panel notice-summary">{{ syncInfo }}<button class="btn small" @click="load(); syncStatus()">刷新</button></div>
-  <form class="toolbar" @submit.prevent="search"><div class="filter-grid">
-    <div class="filter-field"><label>搜索字段</label><select v-model="filter.field"><option v-for="f in fields" :key="f[0]" :value="f[0]">{{f[1]}}</option></select></div>
-    <div class="filter-field grow"><label>关键词</label><input v-model.trim="filter.q" maxlength="200" placeholder="输入文字进行包含匹配" aria-label="通知单关键词" /></div>
-    <div class="filter-field"><label>生效开始日期</label><input type="date" v-model="filter.start" /></div>
-    <div class="filter-field"><label>生效结束日期</label><input type="date" v-model="filter.end" /></div>
-  </div><div class="actions"><button class="btn primary">查询</button><button type="button" class="btn" @click="reset">重置</button></div></form>
-  <p v-if="error" class="panel notice-summary" role="alert">{{error}} <button class="btn" @click="load">重试</button></p>
-  <section class="panel"><div class="table-panel-top">共 {{total.toLocaleString()}} 条通知单</div>
-    <div v-if="loading" class="empty-state" role="status">正在查询…</div>
-    <div v-else class="table-wrap"><table><thead><tr><th>表单编号</th><th>类别</th><th>提出部门</th><th>创建人员</th><th>生效时间</th><th>操作</th></tr></thead>
-    <tbody><tr v-for="n in rows" :key="n.id"><td><RouterLink class="table-title" :to="'/notices/' + encodeURIComponent(n.id)">{{n.code || n.id}}</RouterLink></td><td>{{n.kind || '—'}}</td><td>{{n.department || '—'}}</td><td>{{n.creator || '—'}}</td><td>{{n.execution_time.replace('T',' ')}}</td><td><RouterLink :to="'/notices/' + encodeURIComponent(n.id)">查看详情</RouterLink></td></tr></tbody></table>
-    <div v-if="!rows.length && !error" class="empty-state">没有符合条件的通知单</div></div>
-    <div class="pagination"><span>第 {{page}} / {{pages}} 页</span><div class="page-buttons"><select v-model="size" @change="page=1"><option :value="20">20条/页</option><option :value="50">50条/页</option><option :value="100">100条/页</option></select><button :disabled="page<=1 || loading" @click="page--">上一页</button><button v-for="p in buttons" :key="p" :class="{active:page===p}" @click="page=p">{{p}}</button><button :disabled="page>=pages || loading" @click="page++">下一页</button></div></div>
-  </section></ApiAccess>
+  <section class="notice-hero">
+    <span class="eyebrow">通知单资料库</span>
+    <h1>找到你需要的那张通知单</h1>
+    <p>记得一段内容、一个工作号，或一个人的名字，都可以从这里开始。</p>
+    <form @submit.prevent="search">
+      <div class="notice-search">
+        <span aria-hidden="true">⌕</span
+        ><input
+          v-model="filter.q"
+          maxlength="200"
+          aria-label="搜索通知单"
+          placeholder="搜索通知内容、编号、工作号、人员…"
+        /><button class="btn primary" :disabled="loading">搜索通知单</button>
+      </div>
+      <div class="search-help">
+        <span>支持部分文字匹配 · 多个关键词用空格分隔，结果同时包含这些关键词</span
+        ><button
+          type="button"
+          class="text-button"
+          @click="advanced = !advanced"
+          :aria-expanded="advanced"
+        >
+          {{ advanced ? '收起筛选 ↑' : '更多筛选 ↓' }}
+        </button>
+      </div>
+      <div v-if="advanced" class="advanced-search">
+        <label
+          >搜索范围<select v-model="filter.field">
+            <option v-for="f in fields" :key="f[0]" :value="f[0]">{{ f[1] }}</option>
+          </select></label
+        ><label>生效日期从<input type="date" v-model="filter.start" /></label
+        ><label>至<input type="date" v-model="filter.end" /></label
+        ><button type="button" class="btn" @click="reset">清空条件</button>
+      </div>
+    </form>
+  </section>
+  <div class="results-heading">
+    <h2>
+      {{ applied ? '搜索结果' : '全部通知单' }}
+      <span v-if="!loading && !error">{{ total.toLocaleString() }} 条</span>
+    </h2>
+    <span>按生效时间由近到远</span>
+  </div>
+  <p v-if="error" role="alert" class="error-message">
+    {{ error }} <button class="btn" @click="load">重新查询</button>
+  </p>
+  <div v-else-if="loading" class="search-loading" role="status">
+    <div v-for="i in 3" :key="i" class="skeleton-card"><i></i><i></i><i></i></div>
+    <p>正在查找通知单…</p>
+  </div>
+  <section v-else-if="!rows.length" class="empty-search">
+    <h2>没有找到符合条件的通知单</h2>
+    <p>试试缩短关键词、只输入工作号的一部分，或放宽日期范围。</p>
+    <button class="btn" @click="reset">清空筛选，查看全部</button>
+  </section>
+  <section v-else class="notice-results">
+    <article v-for="n in rows" :key="n.id" class="notice-result">
+      <header>
+        <div>
+          <span class="notice-kind">{{ n.kind || '技术通知单' }}</span
+          ><RouterLink
+            :to="{
+              path: '/notices/' + encodeURIComponent(n.id),
+              query: { ...route.query, from: route.fullPath },
+            }"
+            class="notice-code"
+            ><HighlightText :text="n.code || n.id" :query="applied"
+          /></RouterLink>
+        </div>
+        <time>{{ n.execution_time.replace('T', ' ') }}</time>
+      </header>
+      <div class="notice-meta">
+        <span
+          >提出部门 <b><HighlightText :text="n.department || '未填写'" :query="applied" /></b></span
+        ><span
+          >创建人 <b><HighlightText :text="n.creator || '未填写'" :query="applied" /></b></span
+        ><span
+          >工作号 / 部套号
+          <b><HighlightText :text="n.work_number || '未填写'" :query="applied" /></b
+        ></span>
+      </div>
+      <p class="notice-preview">
+        <HighlightText
+          :text="n.preview || '该通知单未填写正文，请查看详细信息。'"
+          :query="applied"
+        />
+      </p>
+      <p v-if="n.reason" class="notice-reason">
+        <strong>通知原因</strong> <HighlightText :text="n.reason" :query="applied" />
+      </p>
+      <div v-if="applied && n.matches?.length" class="match-list">
+        <details>
+          <summary>
+            查看关键词命中位置（{{ n.matches.length }}{{ n.matches.length === 6 ? '+' : '' }}）
+          </summary>
+          <p v-for="(m, i) in n.matches" :key="i">
+            <strong>{{ label(m.field) }}</strong> <HighlightText :text="m.text" :query="applied" />
+          </p>
+        </details>
+      </div>
+      <footer>
+        <span>完整正文、审批信息与执行记录</span
+        ><RouterLink
+          :to="{
+            path: '/notices/' + encodeURIComponent(n.id),
+            query: { ...route.query, from: route.fullPath },
+          }"
+          >打开通知单 →</RouterLink
+        >
+      </footer>
+    </article>
+  </section>
+  <nav v-if="!error && !loading && total" class="result-pagination" aria-label="结果翻页">
+    <span>第 {{ page }} / {{ pages }} 页 · 每页 20 条</span>
+    <div>
+      <button class="btn" :disabled="page <= 1" @click="go(page - 1)">上一页</button
+      ><button class="btn" :disabled="page >= pages" @click="go(page + 1)">下一页</button>
+    </div>
+  </nav>
 </template>
-<style scoped>.notice-summary{padding:16px;display:flex;justify-content:space-between;margin-bottom:18px}.actions{display:flex;gap:12px;margin-top:18px}input,select{padding:9px;min-width:0}td{max-width:350px;overflow-wrap:anywhere}</style>

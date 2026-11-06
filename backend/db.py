@@ -1,10 +1,29 @@
 import datetime as dt
 import os
-from sqlalchemy import create_engine, Column, String, DateTime, Text, JSON, Integer, Index
+from sqlalchemy import create_engine, Column, String, DateTime, Text, JSON, Integer, Index, Boolean, ForeignKey
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.mysql import LONGTEXT
 
 Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(64), unique=True, nullable=False)
+    display_name = Column(String(128), nullable=False)
+    password_hash = Column(String(256), nullable=False)
+    role = Column(String(32), nullable=False, default='user')
+    department = Column(String(256), nullable=False, default='')
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: now())
+    last_login_at = Column(DateTime)
+    __table_args__ = {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+
+class LoginSession(Base):
+    __tablename__ = 'login_sessions'
+    token_hash = Column(String(64), primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
 def now():
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
