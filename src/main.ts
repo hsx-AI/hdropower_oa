@@ -3,10 +3,19 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 import App from './App.vue';
 import './style.css';
 import './workspace.css';
-import { connected, restoreSession } from './api';
+import { connected, restoreSession, currentUser } from './api';
 const routes = [
+  {
+    path: '/admin',
+    component: () => import('./views/AdminHealth.vue'),
+    meta: { title: '系统运维', admin: true },
+  },
   { path: '/login', component: () => import('./views/Login.vue'), meta: { title: '登录' } },
-  { path: '/', component: () => import('./views/Dashboard.vue'), meta: { title: '工作台', demo: true } },
+  {
+    path: '/',
+    component: () => import('./views/Dashboard.vue'),
+    meta: { title: '工作台', demo: true },
+  },
   {
     path: '/notices',
     component: () => import('./views/Notices.vue'),
@@ -73,6 +82,7 @@ router.beforeEach(async (to) => {
   if (!connected.value && to.path !== '/login')
     return { path: '/login', query: { redirect: to.fullPath } };
   if (connected.value && to.path === '/login') return '/notices';
+  if (to.meta.admin && currentUser.value?.role !== 'admin') return '/notices';
 });
 router.afterEach((to) => (document.title = `${to.meta.title} · 水电分厂综合管理平台`));
 createApp(App).use(router).mount('#app');

@@ -68,6 +68,12 @@ async function logout() {
           ><Icon :name="item[2]!" :size="19" /><span>{{ item[1] }}</span
           ><small v-if="item[0] !== '/notices'">演示</small></RouterLink
         >
+        <RouterLink
+          v-if="currentUser.role === 'admin'"
+          to="/admin"
+          :class="{ selected: route.path === '/admin' }"
+          ><Icon name="settings" :size="19" /><span>系统运维</span><small>管理员</small></RouterLink
+        >
       </nav>
       <div class="sidebar-caption">专注每一条工作信息<br /><span>水电分厂综合业务平台</span></div>
     </aside>

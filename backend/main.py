@@ -16,11 +16,13 @@ from .content import plain_text
 from .detail_view import detail_cost, detail_header, dispatch_from_rows, parse_dispatch_records
 from .dispatch_store import load_dispatch
 from .sync import ensure_detail
+from .admin_health import HealthMonitor
 
 @asynccontextmanager
 async def lifespan(app):
     app.state.engine = engine_from_env()
     initialize(app.state.engine)
+    app.state.health_monitor = HealthMonitor()
     yield
     app.state.engine.dispose()
 
@@ -50,6 +52,16 @@ def sign_out(request: Request, response: Response, db: Session = Depends(session
 def health(db: Session = Depends(session)):
     db.execute(text('SELECT 1'))
     return {'status': 'ok'}
+
+def administrator(user=Depends(authorize)):
+    if not user or user.get('role') != 'admin':
+        raise HTTPException(403, '仅管理员可查看系统运维信息')
+    return user
+
+@app.get('/api/admin/health')
+def admin_health(request: Request, response: Response, user=Depends(administrator)):
+    response.headers['Cache-Control'] = 'no-store'
+    return request.app.state.health_monitor.get(request.app.state.engine)
 
 def view(n):
     return {'id': n.id, 'code': n.code, 'execution_time': n.execution_time.isoformat(),

@@ -30,6 +30,7 @@ def client(monkeypatch):
             db.add(Notice(id=key,code='TZ-'+key,execution_time=dt.datetime(2026,10,1),department='测试部门',creator='合成人员',kind='工艺',content=content,search_text=content+' 测试部门',raw=raw,digest='0'*64))
         db.commit()
     monkeypatch.setattr(main,'engine_from_env',lambda:engine)
+    monkeypatch.setenv('OA_DETAIL_ON_DEMAND', '0')
     _attempts.clear()
     with TestClient(main.app) as c:
         c.test_engine=engine
