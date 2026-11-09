@@ -98,15 +98,117 @@ def cycle(engine, fetch=None, months=None):
                     status=locals().get('status', 'failed'), details=details, finished_at=now()))
             lock.execute(text("SELECT RELEASE_LOCK('hydro_oa_x5_sync')"))
 
+DETAIL_TTL_SECONDS = 3600
+
+def merge_detail_raw(engine, notice_id, record):
+    """Merge detail-query fields into notices.raw without wiping list-sync identity."""
+    from sqlalchemy.orm import Session
+    from .db import Notice, now
+    if not isinstance(record, dict) or record.get('HEC_TechnologyOrder') not in (None, notice_id):
+        if isinstance(record, dict) and record.get('HEC_TechnologyOrder') and record.get('HEC_TechnologyOrder') != notice_id:
+            raise ValueError('detail_id_mismatch')
+    with Session(engine) as db:
+        notice = db.get(Notice, notice_id)
+        if notice is None:
+            raise ValueError('notice_missing')
+        merged = dict(notice.raw or {})
+        for key, value in (record or {}).items():
+            if value is None or value == '':
+                continue
+            merged[key] = value
+        notice.raw = merged
+        if record.get('fOrderCodeStr'):
+            notice.code = str(record['fOrderCodeStr'])
+        if record.get('fCreatePerson'):
+            notice.creator = str(record['fCreatePerson'])
+        if record.get('fOrderType'):
+            notice.kind = str(record['fOrderType'])
+        if record.get('fProposedDept'):
+            notice.department = str(record['fProposedDept'])
+        if record.get('fOrderContent'):
+            from html import unescape
+            import re
+            notice.content = unescape(re.sub(r'<[^>]+>', ' ', str(record['fOrderContent'])))
+        notice.search_text = '\n'.join(str(v) for v in merged.values() if v is not None)
+        notice.updated_at = now()
+        notice.detail_synced_at = now()
+        db.commit()
+    return {'merged_fields': len(record or {})}
+
+def sync_detail(engine, notice_id, fetch=None):
+    from .dispatch_store import store_dispatch
+    from .x5 import detail as detail_source
+    fetch = fetch or detail_source.fetch_detail
+    records = fetch(notice_id)
+    if not records:
+        raise ValueError('detail_empty')
+    # Detail action returns the master row; dispatch is a separate capture not present yet.
+    merged = merge_detail_raw(engine, notice_id, records[0])
+    dispatch = store_dispatch(engine, notice_id, records)
+    return {'notice_id': notice_id, **merged, **dispatch}
+
+def ensure_detail(engine, notice_id, force=False, ttl_seconds=DETAIL_TTL_SECONDS, fetch=None):
+    """On-demand detail crawl when opening a notice. Skips hourly bulk; caches by detail_synced_at."""
+    import hashlib
+    import os
+    from sqlalchemy.orm import Session
+    from .db import Notice, now
+    from .x5.detail import template_ready
+
+    if os.environ.get('OA_DETAIL_ON_DEMAND', '1') in ('0', 'false', 'False'):
+        return {'status': 'disabled'}
+    ready, reason = template_ready()
+    if not ready:
+        return {'status': 'skipped', 'reason': reason}
+
+    with Session(engine) as db:
+        notice = db.get(Notice, notice_id)
+        if notice is None:
+            return {'status': 'missing'}
+        synced = notice.detail_synced_at
+        if (not force and synced and (now() - synced).total_seconds() < ttl_seconds):
+            return {'status': 'fresh', 'synced_at': synced.isoformat() + 'Z'}
+
+    lock_name = 'hoa_dt_' + hashlib.sha256(notice_id.encode()).hexdigest()[:20]
+    with engine.connect() as conn:
+        try:
+            locked = conn.scalar(text('SELECT GET_LOCK(:name, 8)'), {'name': lock_name})
+        except Exception:
+            locked = 1
+        if locked != 1:
+            return {'status': 'busy'}
+        try:
+            with Session(engine) as db:
+                notice = db.get(Notice, notice_id)
+                synced = notice.detail_synced_at if notice else None
+                if (not force and synced and (now() - synced).total_seconds() < ttl_seconds):
+                    return {'status': 'fresh', 'synced_at': synced.isoformat() + 'Z'}
+            result = sync_detail(engine, notice_id, fetch=fetch)
+            return {'status': 'synced', **result}
+        except Exception as exc:
+            return {'status': 'failed', 'error_type': type(exc).__name__}
+        finally:
+            try:
+                conn.execute(text('SELECT RELEASE_LOCK(:name)'), {'name': lock_name})
+                conn.commit()
+            except Exception:
+                pass
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['init', 'once', 'worker', 'import'])
+    parser.add_argument('command', choices=['init', 'once', 'worker', 'import', 'detail'])
     parser.add_argument('--file', type=Path)
     parser.add_argument('--month')
+    parser.add_argument('--id', help='技术通知单主键，用于 detail 命令')
     args = parser.parse_args()
     engine = engine_from_env()
     initialize(engine)
     if args.command == 'init':
+        return
+    if args.command == 'detail':
+        if not args.id:
+            parser.error('detail 需要 --id HEC_TechnologyOrder')
+        print(json.dumps(sync_detail(engine, args.id), ensure_ascii=False))
         return
     if args.command == 'import':
         if not args.file or not args.month:

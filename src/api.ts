@@ -53,6 +53,12 @@ export interface NoticeRow {
   preview: string;
   reason: string;
   work_number: string;
+  project_name: string;
+  issue_dept: string;
+  create_time: string;
+  is_effective: string;
+  is_discarded: string;
+  discard_time: string;
   matches: { field: string; text: string }[];
 }
 export const fields = [

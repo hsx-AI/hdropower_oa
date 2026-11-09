@@ -13,6 +13,9 @@ from .db import Notice, Tracking, SyncRun, SyncMonth, engine_from_env
 from .auth import authorize, login, logout
 from .db import initialize
 from .content import plain_text
+from .detail_view import detail_cost, detail_header, dispatch_from_rows, parse_dispatch_records
+from .dispatch_store import load_dispatch
+from .sync import ensure_detail
 
 @asynccontextmanager
 async def lifespan(app):
@@ -56,6 +59,26 @@ def view(n):
 def clean(value):
     return plain_text(value)
 
+def pick(raw, *keys):
+    for key in keys:
+        value = raw.get(key)
+        if value is None or value == '' or value == {}:
+            continue
+        if isinstance(value, dict) and 'value' in value:
+            value = value.get('value')
+        text = clean(value)
+        if text:
+            return text
+    return ''
+
+def flag_text(value):
+    text = clean(value)
+    if text in ('1', 'true', 'True', 'Y', 'y'):
+        return '是'
+    if text in ('0', 'false', 'False', 'N', 'n'):
+        return '否'
+    return text
+
 def excerpt(value, tokens, length=320):
     value = clean(value)
     hits = [value.lower().find(t.lower()) for t in tokens if t.lower() in value.lower()]
@@ -67,9 +90,18 @@ def listing(n, tokens, field):
     matches = [{'field': key, 'text': excerpt(value, tokens)} for key, value in raw.items()
                if (field == 'all' or key == field) and tokens
                and any(t.lower() in clean(value).lower() for t in tokens)]
+    create_time = pick(raw, 'fCreateTimeStr', 'fBillTimeStr', 'fCreateTime', 'fBillTime')
+    if create_time.endswith('Z') and 'T' in create_time:
+        create_time = create_time.replace('T', ' ').rstrip('Z')
     return {**view(n), 'preview': excerpt(n.content, tokens),
-            'work_number': clean(raw.get('fWorkPartNumStr')),
-            'reason': excerpt(raw.get('fOrderCause'), tokens, 180), 'matches': matches[:6]}
+            'work_number': pick(raw, 'fWorkPartNumStr') or clean(raw.get('fWorkPartNumStr')),
+            'reason': excerpt(raw.get('fOrderCause'), tokens, 180), 'matches': matches[:6],
+            'project_name': pick(raw, 'fProjectName', 'fProject', 'fName', 'fBillName', 'fClassification'),
+            'issue_dept': pick(raw, 'fCreateDeptName', 'fProposedDept') or n.department,
+            'create_time': create_time,
+            'is_effective': flag_text(raw.get('fIsExecution')) or pick(raw, 'fIsExecution'),
+            'is_discarded': flag_text(pick(raw, 'fIsAbolish', 'fAbolish', 'fIsDiscard', 'fDiscarded', 'fIsInvalid')),
+            'discard_time': pick(raw, 'fAbolishTimeStr', 'fDiscardTimeStr', 'fAbolishTime', 'fDiscardTime', 'fInvalidTime')}
 
 @app.get('/api/notices')
 def notices(q: str = Query('', max_length=200), field: str = Query('all', pattern=r'^[A-Za-z_][A-Za-z0-9_]{0,63}$'),
@@ -99,15 +131,38 @@ def notices(q: str = Query('', max_length=200), field: str = Query('all', patter
                       .offset((page - 1) * size).limit(size)).all()
     return {'total': total, 'page': page, 'size': size, 'items': [listing(n, tokens, field) for n in rows]}
 
-@app.get('/api/notices/{notice_id}')
-def detail(notice_id: str, db: Session = Depends(session)):
+def detail_payload(db, notice_id, sync_info=None):
     n = db.get(Notice, notice_id)
     if n is None:
         raise HTTPException(404, '通知单不存在')
     logs = db.scalars(select(Tracking).where(Tracking.notice_id == notice_id).order_by(desc(Tracking.id)).limit(200)).all()
-    return {**view(n), 'content': plain_text(n.raw.get('fOrderContent') or n.content), 'fields': n.raw,
+    stored = load_dispatch(db, notice_id)
+    dispatch_rows = dispatch_from_rows(stored)
+    if not dispatch_rows:
+        # Fall back to any nested dispatch snapshot already present on the notice raw JSON.
+        dispatch_rows = [
+            {k: r[k] for k in ('dept_path', 'preferred_receiver', 'receiver', 'received_at')}
+            for r in parse_dispatch_records(notice_id, n.raw or {})
+        ]
+    header = detail_header(n)
+    cost = detail_cost(n.raw or {})
+    return {**view(n), 'content': plain_text((n.raw or {}).get('fOrderContent') or n.content),
+            'fields': n.raw, 'detail_header': header, 'cost': cost, 'dispatch_rows': dispatch_rows,
+            'dispatch_pending': len(dispatch_rows) == 0,
+            'detail_sync': sync_info or {'status': 'idle'},
+            'detail_synced_at': n.detail_synced_at.isoformat() + 'Z' if n.detail_synced_at else None,
             'tracking': [{'id': t.id, 'status': t.status, 'note': t.note, 'author': t.author,
                           'created_at': t.created_at.isoformat() + 'Z'} for t in logs]}
+
+@app.get('/api/notices/{notice_id}')
+def detail(notice_id: str, request: Request, refresh: bool = Query(False), db: Session = Depends(session)):
+    if db.get(Notice, notice_id) is None:
+        raise HTTPException(404, '通知单不存在')
+    # Click-to-open crawl: one notice only, cached by detail_synced_at; not part of hourly bulk.
+    sync_info = ensure_detail(request.app.state.engine, notice_id, force=refresh)
+    if sync_info.get('status') == 'synced':
+        db.expire_all()
+    return detail_payload(db, notice_id, sync_info)
 
 class TrackingInput(BaseModel):
     status: Literal['待处理', '处理中', '已完成']

@@ -66,13 +66,16 @@ async function logout() {
               item[0] === '/notices' ? route.path.startsWith('/notices') : route.path === item[0],
           }"
           ><Icon :name="item[2]!" :size="19" /><span>{{ item[1] }}</span
-          ><small v-if="item[0] !== '/notices'">开发中</small></RouterLink
+          ><small v-if="item[0] !== '/notices'">演示</small></RouterLink
         >
       </nav>
       <div class="sidebar-caption">专注每一条工作信息<br /><span>水电分厂综合业务平台</span></div>
     </aside>
     <main class="oa-main">
       <p v-if="error" class="error-message" role="alert">{{ error }}</p>
+      <p v-if="route.meta.demo" class="demo-banner" role="note">
+        当前为前端演示界面，数据为本地样例，尚未接入真实后台。正式业务请使用「技术通知单」。
+      </p>
       <RouterView />
       <footer class="oa-footer">水电分厂综合管理平台 · 让查阅更简单</footer>
     </main>

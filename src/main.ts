@@ -6,7 +6,7 @@ import './workspace.css';
 import { connected, restoreSession } from './api';
 const routes = [
   { path: '/login', component: () => import('./views/Login.vue'), meta: { title: '登录' } },
-  { path: '/', component: () => import('./views/ComingSoon.vue'), meta: { title: '工作台' } },
+  { path: '/', component: () => import('./views/Dashboard.vue'), meta: { title: '工作台', demo: true } },
   {
     path: '/notices',
     component: () => import('./views/Notices.vue'),
@@ -19,43 +19,43 @@ const routes = [
   },
   {
     path: '/attendance',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '考勤管理' },
+    component: () => import('./views/Attendance.vue'),
+    meta: { title: '考勤管理', demo: true },
   },
   {
     path: '/equipment',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '设备数字孪生' },
+    component: () => import('./views/Equipment.vue'),
+    meta: { title: '设备数字孪生', demo: true },
   },
   {
     path: '/assets',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '设备台账' },
+    component: () => import('./views/Assets.vue'),
+    meta: { title: '设备台账', demo: true },
   },
   {
     path: '/orders',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '安灯工单' },
+    component: () => import('./views/Orders.vue'),
+    meta: { title: '安灯工单', demo: true },
   },
   {
     path: '/repair',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '扫码安灯报修', mobile: true },
+    component: () => import('./views/Repair.vue'),
+    meta: { title: '扫码安灯报修', mobile: true, demo: true },
   },
   {
     path: '/handover',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '交接班管理' },
+    component: () => import('./views/Handover.vue'),
+    meta: { title: '交接班管理', demo: true },
   },
   {
     path: '/reports',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '统计报表' },
+    component: () => import('./views/Reports.vue'),
+    meta: { title: '统计报表', demo: true },
   },
   {
     path: '/settings',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: { title: '基础设置' },
+    component: () => import('./views/Settings.vue'),
+    meta: { title: '基础设置', demo: true },
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ];

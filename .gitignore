@@ -13,3 +13,5 @@ backend/env.local.ps1
 backend/x5-private/
 private-data/
 backend/x5-sync-logs/
+详情请求/
+work/

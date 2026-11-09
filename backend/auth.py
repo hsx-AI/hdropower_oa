@@ -36,9 +36,16 @@ _lock = threading.Lock()
 def public_user(user):
     return {key: getattr(user, key) for key in ('id', 'username', 'display_name', 'role', 'department')}
 
+def request_hosts(request):
+    hosts = {(request.headers.get('host') or '').lower()}
+    forwarded = (request.headers.get('x-forwarded-host') or '').split(',')[0].strip().lower()
+    if forwarded:
+        hosts.add(forwarded)
+    return hosts - {''}
+
 def check_origin(request):
     origin = request.headers.get('origin')
-    if origin and urlsplit(origin).netloc != request.headers.get('host'):
+    if origin and urlsplit(origin).netloc.lower() not in request_hosts(request):
         raise HTTPException(403, '请求来源不匹配，请刷新页面后重试')
 
 def authorize(request: Request):

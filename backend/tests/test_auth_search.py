@@ -21,7 +21,13 @@ def client(monkeypatch):
         db.add_all([User(username='admin',display_name='测试管理员',role='admin',password_hash=hash_password('synthetic-password')),
                     User(username='reader',display_name='测试用户',role='user',password_hash=hash_password('synthetic-password'))])
         for key,content in [('A','转轮 安装前必须检查尺寸 100%_设备'),('B','另一张水泵通知')]:
-            db.add(Notice(id=key,code='TZ-'+key,execution_time=dt.datetime(2026,10,1),department='测试部门',creator='合成人员',kind='工艺',content=content,search_text=content+' 测试部门',raw={'fOrderContent':content,'fOrderCodeStr':'TZ-'+key},digest='0'*64))
+            raw={'fOrderContent':content,'fOrderCodeStr':'TZ-'+key,'fCreateDeptName':'测试部门',
+                 'fSupplementStatus':'非补件','fOrderType':'工艺','fOrderTypeCode':'G',
+                 'fClassification':'水轮发电机','fWorkPartNumStr':'WN-'+key,
+                 'fOrderCause':'合成原因','fMaterialCost':'1','fProcessCost':'2','fEstimateCost':'3',
+                 'HEC_TechnologyDispatch':[{'HEC_TechnologyDispatch':'D-'+key,'fSelectDeptFname':'/测试分厂/组员',
+                                           'fPreferredPerson':'甲','fReceivePerson':'乙','fReceiveTimeStr':''}]}
+            db.add(Notice(id=key,code='TZ-'+key,execution_time=dt.datetime(2026,10,1),department='测试部门',creator='合成人员',kind='工艺',content=content,search_text=content+' 测试部门',raw=raw,digest='0'*64))
         db.commit()
     monkeypatch.setattr(main,'engine_from_env',lambda:engine)
     _attempts.clear()
@@ -51,6 +57,9 @@ def test_auth_lifecycle_and_cookie(client):
 
 def test_bad_login_origin_and_rate_limit(client):
     assert client.post('/api/auth/login',headers={'Origin':'https://untrusted.invalid'},json={'username':'admin','password':'synthetic-password'}).status_code==403
+    assert client.post('/api/auth/login',headers={'Origin':'http://10.150.86.130:5173','Host':'127.0.0.1:8000','X-Forwarded-Host':'10.150.86.130:5173'},json={'username':'admin','password':'synthetic-password'}).status_code==200
+
+def test_login_rate_limit(client):
     for _ in range(20):
         assert client.post('/api/auth/login',json={'username':'missing','password':'bad'}).status_code==401
     assert sign_in(client).status_code==429
@@ -65,6 +74,17 @@ def test_disabled_expired_and_csrf(client):
     with Session(client.test_engine) as db:
         user=db.scalar(select(User).where(User.username=='admin'));user.active=False;db.commit()
     assert client.get('/api/auth/me').status_code==401
+
+def test_detail_content_payload(client):
+    sign_in(client)
+    result=client.get('/api/notices/A').json()
+    assert result['detail_header']['code']=='TZ-A'
+    assert result['detail_header']['supplement_status']=='非补件'
+    assert result['detail_header']['issue_dept']=='测试部门'
+    assert result['cost']=={'material':'1','process':'2','estimate':'3'}
+    assert result['dispatch_rows'][0]['preferred_receiver']=='甲'
+    assert result['dispatch_pending'] is False
+    assert result['detail_sync']['status'] in ('skipped', 'disabled', 'fresh', 'synced', 'failed', 'busy')
 
 def test_search_tokens_literal_wildcards_and_tracking_author(client):
     sign_in(client,'reader')

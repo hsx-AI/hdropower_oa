@@ -18,6 +18,18 @@ let controller: AbortController | undefined;
 function label(key: string) {
   return fields.find((f) => f[0] === key)?.[1] || '其他信息';
 }
+function cell(value?: string | null) {
+  return value?.trim() ? value : '';
+}
+function timeText(value?: string | null) {
+  return cell(value).replace('T', ' ');
+}
+function detailQuery(id: string) {
+  return {
+    path: '/notices/' + encodeURIComponent(id),
+    query: { ...route.query, from: route.fullPath },
+  };
+}
 async function load() {
   Object.assign(filter, {
     q: String(route.query.q || ''),
@@ -120,7 +132,7 @@ onBeforeUnmount(() => controller?.abort());
     {{ error }} <button class="btn" @click="load">重新查询</button>
   </p>
   <div v-else-if="loading" class="search-loading" role="status">
-    <div v-for="i in 3" :key="i" class="skeleton-card"><i></i><i></i><i></i></div>
+    <div class="skeleton-table"><i></i><i></i><i></i><i></i></div>
     <p>正在查找通知单…</p>
   </div>
   <section v-else-if="!rows.length" class="empty-search">
@@ -128,62 +140,65 @@ onBeforeUnmount(() => controller?.abort());
     <p>试试缩短关键词、只输入工作号的一部分，或放宽日期范围。</p>
     <button class="btn" @click="reset">清空筛选，查看全部</button>
   </section>
-  <section v-else class="notice-results">
-    <article v-for="n in rows" :key="n.id" class="notice-result">
-      <header>
-        <div>
-          <span class="notice-kind">{{ n.kind || '技术通知单' }}</span
-          ><RouterLink
-            :to="{
-              path: '/notices/' + encodeURIComponent(n.id),
-              query: { ...route.query, from: route.fullPath },
-            }"
-            class="notice-code"
-            ><HighlightText :text="n.code || n.id" :query="applied"
-          /></RouterLink>
-        </div>
-        <time>{{ n.execution_time.replace('T', ' ') }}</time>
-      </header>
-      <div class="notice-meta">
-        <span
-          >提出部门 <b><HighlightText :text="n.department || '未填写'" :query="applied" /></b></span
-        ><span
-          >创建人 <b><HighlightText :text="n.creator || '未填写'" :query="applied" /></b></span
-        ><span
-          >工作号 / 部套号
-          <b><HighlightText :text="n.work_number || '未填写'" :query="applied" /></b
+  <section v-else class="notice-grid-wrap">
+    <div class="notice-grid" role="table" aria-label="通知单列表">
+      <div class="notice-grid-head" role="row">
+        <span role="columnheader">#</span>
+        <span role="columnheader">项目名</span>
+        <span role="columnheader">编号</span>
+        <span role="columnheader">发出单位</span>
+        <span role="columnheader">改版单类别</span>
+        <span role="columnheader">编制人</span>
+        <span role="columnheader">编制时间</span>
+        <span role="columnheader">是否生效</span>
+        <span role="columnheader">生效时间</span>
+        <span role="columnheader">工作号部套号</span>
+        <span role="columnheader">是否废弃</span>
+        <span role="columnheader">废弃时间</span>
+        <span role="columnheader">操作</span>
+      </div>
+      <div v-for="(n, index) in rows" :key="n.id" class="notice-grid-row" role="row">
+        <span role="cell">{{ (page - 1) * 20 + index + 1 }}</span>
+        <span role="cell"
+          ><HighlightText :text="cell(n.project_name)" :query="applied"
+        /></span>
+        <span role="cell" class="notice-grid-code"
+          ><RouterLink :to="detailQuery(n.id)"
+            ><HighlightText :text="cell(n.code) || n.id" :query="applied" /></RouterLink
         ></span>
-      </div>
-      <p class="notice-preview">
-        <HighlightText
-          :text="n.preview || '该通知单未填写正文，请查看详细信息。'"
-          :query="applied"
-        />
-      </p>
-      <p v-if="n.reason" class="notice-reason">
-        <strong>通知原因</strong> <HighlightText :text="n.reason" :query="applied" />
-      </p>
-      <div v-if="applied && n.matches?.length" class="match-list">
-        <details>
-          <summary>
-            查看关键词命中位置（{{ n.matches.length }}{{ n.matches.length === 6 ? '+' : '' }}）
-          </summary>
-          <p v-for="(m, i) in n.matches" :key="i">
-            <strong>{{ label(m.field) }}</strong> <HighlightText :text="m.text" :query="applied" />
-          </p>
-        </details>
-      </div>
-      <footer>
-        <span>完整正文、审批信息与执行记录</span
-        ><RouterLink
-          :to="{
-            path: '/notices/' + encodeURIComponent(n.id),
-            query: { ...route.query, from: route.fullPath },
-          }"
-          >打开通知单 →</RouterLink
+        <span role="cell"
+          ><HighlightText :text="cell(n.issue_dept) || cell(n.department)" :query="applied"
+        /></span>
+        <span role="cell"><HighlightText :text="cell(n.kind)" :query="applied" /></span>
+        <span role="cell"><HighlightText :text="cell(n.creator)" :query="applied" /></span>
+        <span role="cell">{{ timeText(n.create_time) }}</span>
+        <span role="cell">{{ cell(n.is_effective) }}</span>
+        <span role="cell">{{ timeText(n.execution_time) }}</span>
+        <span role="cell"
+          ><HighlightText :text="cell(n.work_number)" :query="applied"
+        /></span>
+        <span role="cell">{{ cell(n.is_discarded) }}</span>
+        <span role="cell">{{ timeText(n.discard_time) }}</span>
+        <span role="cell" class="notice-grid-actions"
+          ><RouterLink :to="detailQuery(n.id)">查看</RouterLink></span
         >
-      </footer>
-    </article>
+        <div
+          v-if="applied && n.matches?.length"
+          class="notice-grid-matches"
+          role="cell"
+        >
+          <details>
+            <summary>
+              关键词命中 {{ n.matches.length }}{{ n.matches.length === 6 ? '+' : '' }}
+            </summary>
+            <p v-for="(m, i) in n.matches" :key="i">
+              <strong>{{ label(m.field) }}</strong>
+              <HighlightText :text="m.text" :query="applied" />
+            </p>
+          </details>
+        </div>
+      </div>
+    </div>
   </section>
   <nav v-if="!error && !loading && total" class="result-pagination" aria-label="结果翻页">
     <span>第 {{ page }} / {{ pages }} 页 · 每页 20 条</span>

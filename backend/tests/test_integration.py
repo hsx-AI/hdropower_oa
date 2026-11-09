@@ -31,8 +31,6 @@ def database(monkeypatch):
         db.add(User(username='test',display_name='测试员',role='admin',password_hash=hash_password('test-password')))
         db.commit()
     monkeypatch.setenv('DATABASE_URL', url.render_as_string(hide_password=False))
-    monkeypatch.setenv('OA_USER', 'test')
-    monkeypatch.setenv('OA_PASSWORD', 'test-password')
     try:
         yield engine
     finally:

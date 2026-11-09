@@ -40,6 +40,7 @@ class Notice(Base):
     raw = Column(JSON, nullable=False)
     digest = Column(String(64), nullable=False)
     updated_at = Column(DateTime, default=now, nullable=False)
+    detail_synced_at = Column(DateTime)
     __table_args__ = (Index('ix_notice_date_id', 'execution_time', 'id'),
                       {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'})
 
@@ -59,6 +60,21 @@ class Tracking(Base):
     created_at = Column(DateTime, default=now, nullable=False)
     __table_args__ = {'mysql_charset': 'utf8mb4'}
 
+class NoticeDispatch(Base):
+    """Source distribution rows; never overwritten by platform tracking."""
+    __tablename__ = 'notice_dispatch'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    notice_id = Column(String(128, collation='utf8mb4_bin'), nullable=False, index=True)
+    source_key = Column(String(128, collation='utf8mb4_bin'), nullable=False, default='')
+    dept_path = Column(String(1024), nullable=False, default='')
+    preferred_receiver = Column(String(256), nullable=False, default='')
+    receiver = Column(String(256), nullable=False, default='')
+    received_at = Column(String(64), nullable=False, default='')
+    digest = Column(String(64), nullable=False, default='')
+    updated_at = Column(DateTime, default=now, nullable=False)
+    __table_args__ = (Index('ux_notice_dispatch_key', 'notice_id', 'source_key', unique=True),
+                      {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'})
+
 class SyncRun(Base):
     __tablename__ = 'sync_runs'
     id = Column(String(36), primary_key=True)
@@ -76,3 +92,12 @@ def engine_from_env():
 
 def initialize(engine):
     Base.metadata.create_all(engine)
+    # create_all does not ALTER existing tables; add on-demand detail cache column when missing.
+    from sqlalchemy import inspect, text
+    try:
+        columns = {column['name'] for column in inspect(engine).get_columns('notices')}
+    except Exception:
+        return
+    if 'detail_synced_at' not in columns:
+        with engine.begin() as conn:
+            conn.execute(text('ALTER TABLE notices ADD COLUMN detail_synced_at DATETIME NULL'))
