@@ -483,6 +483,164 @@ mark {
   text-align: center;
   color: #8c98aa;
 }
+.task-progress {
+  margin: 0 0 14px;
+}
+.task-progress-track {
+  height: 8px;
+  background: #d9e4f2;
+  border-radius: 99px;
+  overflow: hidden;
+}
+.task-progress-track > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #0b4f9c, #2f8cff);
+  border-radius: 99px;
+  transition: width 0.35s ease;
+}
+.task-progress p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #3d5674;
+}
+.notice-board {
+  background: #fff;
+  border: 1px solid #c5d3e4;
+  border-radius: 10px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.notice-board-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  background: #12355b;
+  color: #fff;
+}
+.notice-board-head h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+.notice-board-head p {
+  margin: 4px 0 0;
+  color: #c5d6ea;
+  font-size: 12px;
+}
+.notice-board-head strong {
+  font-size: 22px;
+  white-space: nowrap;
+}
+.notice-filters {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px 12px;
+  padding: 12px;
+  background: #f7fafc;
+}
+.notice-filters label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #3e526b;
+  font-weight: 600;
+}
+.notice-filters input,
+.notice-filters select {
+  width: 100%;
+  border: 1px solid #9eb0c6;
+  background: #fff;
+  color: #1c2b3a;
+  border-radius: 4px;
+  padding: 7px 8px;
+  font-weight: 400;
+}
+.notice-filter-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+.notice-table-wrap {
+  overflow: auto;
+  border: 1px solid #c5d3e4;
+  border-radius: 8px;
+  background: #fff;
+}
+.notice-table-wrap.is-loading {
+  opacity: 0.72;
+}
+.notice-table {
+  width: 100%;
+  min-width: 1280px;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: #1c2b3a;
+}
+.notice-table th {
+  position: sticky;
+  top: 0;
+  background: #1b4f86;
+  color: #fff;
+  font-weight: 600;
+  text-align: left;
+  padding: 9px 8px;
+  white-space: nowrap;
+  z-index: 1;
+}
+.notice-table td {
+  padding: 8px;
+  border-bottom: 1px solid #e4ebf3;
+  vertical-align: top;
+  line-height: 1.45;
+}
+.notice-table tbody tr {
+  cursor: pointer;
+}
+.notice-table tbody tr:nth-child(even) {
+  background: #f4f8fc;
+}
+.notice-table tbody tr:hover {
+  background: #e5f0ff;
+}
+.notice-table .num,
+.notice-table .time {
+  white-space: nowrap;
+  color: #4d6178;
+  font-variant-numeric: tabular-nums;
+}
+.notice-table .code a {
+  color: #0b57d0;
+  font-weight: 700;
+}
+.notice-table .reason {
+  min-width: 220px;
+  max-width: 360px;
+}
+.notice-table .reason > span {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.state-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.state-pill.ok {
+  background: #e5f6ee;
+  color: #0d7a4f;
+}
+.state-pill.bad {
+  background: #fdecea;
+  color: #c2413a;
+}
 @keyframes pulse {
   to {
     opacity: 0.35;
@@ -580,6 +738,17 @@ mark {
 .detail-tab:disabled {
   opacity: 0.45;
 }
+.detail-tab-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #e8f1ff;
+  color: #1677ff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
 .detail-tab-tools {
   margin-left: auto;
   display: flex;
@@ -651,6 +820,24 @@ mark {
   text-align: center;
   color: #8a97a8;
   padding: 18px 10px !important;
+}
+.line-sheet {
+  border: 1px solid #9eb0c8;
+  overflow-x: auto;
+  background: #fff;
+}
+.line-table {
+  min-width: 960px;
+}
+.line-table th,
+.line-table td {
+  white-space: normal;
+  text-align: left;
+}
+.line-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 .order-sheet-body th {
   width: 18%;
@@ -1069,8 +1256,11 @@ mark {
   .results-heading > span {
     font-size: 10px;
   }
-  .notice-grid {
-    min-width: 980px;
+  .notice-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+  .notice-table {
+    min-width: 1100px;
   }
   .document-layout {
     grid-template-columns: 1fr;

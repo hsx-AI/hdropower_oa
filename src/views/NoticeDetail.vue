@@ -3,6 +3,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
 import { api, fields, type NoticeRow } from '../api';
 import HighlightText from '../components/HighlightText.vue';
+import TaskProgress from '../components/TaskProgress.vue';
 
 type DispatchRow = {
   dept_path: string;
@@ -10,6 +11,9 @@ type DispatchRow = {
   receiver: string;
   received_at: string;
 };
+
+type LineColumn = { key: string; label: string };
+type LineSync = { status: string; reason?: string; error_type?: string; received?: number };
 
 type DetailNotice = NoticeRow & {
   content: string;
@@ -32,7 +36,20 @@ type DetailNotice = NoticeRow & {
   cost: { material: string; process: string; estimate: string };
   dispatch_rows: DispatchRow[];
   dispatch_pending: boolean;
-  detail_sync?: { status: string; reason?: string; error_type?: string; synced_at?: string };
+  parts_columns: LineColumn[];
+  parts_rows: Record<string, string>[];
+  tools_columns: LineColumn[];
+  tools_rows: Record<string, string>[];
+  parts_sync?: LineSync;
+  tools_sync?: LineSync;
+  detail_sync?: {
+    status: string;
+    reason?: string;
+    error_type?: string;
+    synced_at?: string;
+    parts?: LineSync;
+    tools?: LineSync;
+  };
   detail_synced_at?: string | null;
   tracking: { id: number; status: string; note: string; author: string; created_at: string }[];
 };
@@ -65,6 +82,20 @@ const syncNote = computed(() => {
   if (sync.status === 'disabled') return '已关闭按需详情同步';
   return '';
 });
+
+function lineEmptyNote(kind: 'parts' | 'tools') {
+  const sync = kind === 'parts' ? notice.value?.parts_sync : notice.value?.tools_sync;
+  const label = kind === 'parts' ? '零件及工艺' : '工装工具';
+  if (!sync) return `本单暂无${label}明细`;
+  if (sync.status === 'skipped') return `未配置${label}请求模板`;
+  if (sync.status === 'failed') return `${label}同步失败（${sync.error_type || '错误'}），以下为库内已有数据`;
+  if (sync.status === 'fresh') return `本单暂无${label}明细（使用近期缓存）`;
+  return `本单暂无${label}明细（源未返回或为空）`;
+}
+
+function cellText(row: Record<string, string>, key: string) {
+  return String(row[key] ?? '');
+}
 let controller: AbortController | undefined;
 
 async function load(refresh = false) {
@@ -73,7 +104,7 @@ async function load(refresh = false) {
   controller = current;
   busy.value = true;
   error.value = '';
-  notice.value = null;
+  if (notice.value?.id !== String(route.params.id)) notice.value = null;
   try {
     const suffix = refresh ? '?refresh=true' : '';
     const data = await api<DetailNotice>(
@@ -138,7 +169,12 @@ onBeforeUnmount(() => controller?.abort());
   <div class="detail-nav">
     <RouterLink :to="back">← 返回列表</RouterLink><span>详细信息</span>
   </div>
-  <div v-if="busy" class="empty-search" role="status">正在读取通知单并同步源详情…</div>
+  <TaskProgress
+    v-if="busy"
+    :active="busy"
+    label="正在读取通知单，并向源系统同步详细内容、零件和工装"
+  />
+  <div v-if="busy && !notice" class="empty-search" role="status">正在打开这张通知单…</div>
   <div v-else-if="error" class="error-message" role="alert">
     {{ error }}<button class="btn" @click="load()">重试</button>
   </div>
@@ -162,10 +198,28 @@ onBeforeUnmount(() => controller?.abort());
       >
         详细内容
       </button>
-      <button type="button" role="tab" class="detail-tab" disabled title="即将接入">
+      <button
+        type="button"
+        role="tab"
+        class="detail-tab"
+        :class="{ active: tab === 'parts' }"
+        :aria-selected="tab === 'parts'"
+        @click="tab = 'parts'"
+      >
         零件及工艺信息
+        <span v-if="notice.parts_rows?.length" class="detail-tab-count">{{ notice.parts_rows.length }}</span>
       </button>
-      <button type="button" role="tab" class="detail-tab" disabled title="即将接入">工装工具</button>
+      <button
+        type="button"
+        role="tab"
+        class="detail-tab"
+        :class="{ active: tab === 'tools' }"
+        :aria-selected="tab === 'tools'"
+        @click="tab = 'tools'"
+      >
+        工装工具
+        <span v-if="notice.tools_rows?.length" class="detail-tab-count">{{ notice.tools_rows.length }}</span>
+      </button>
       <div class="detail-tab-tools" aria-hidden="true">
         <span>打印预览</span><span>流程图</span><span>流程记录</span><span>转发、增发</span>
       </div>
@@ -279,6 +333,54 @@ onBeforeUnmount(() => controller?.abort());
               <th>通知内容：</th>
               <td colspan="5" class="order-content-cell">
                 <HighlightText :text="notice.content || ''" :query="query" />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div v-show="tab === 'parts'" class="detail-pane" role="tabpanel">
+      <div class="line-sheet">
+        <table class="order-dispatch-table line-table">
+          <thead>
+            <tr>
+              <th v-for="col in notice.parts_columns || []" :key="col.key">{{ col.label }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!(notice.parts_rows || []).length">
+              <td :colspan="Math.max((notice.parts_columns || []).length, 1)" class="order-dispatch-empty">
+                {{ lineEmptyNote('parts') }}
+              </td>
+            </tr>
+            <tr v-for="(row, index) in notice.parts_rows || []" :key="row.source_key || index">
+              <td v-for="col in notice.parts_columns || []" :key="col.key">
+                <HighlightText :text="cellText(row, col.key)" :query="query" />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div v-show="tab === 'tools'" class="detail-pane" role="tabpanel">
+      <div class="line-sheet">
+        <table class="order-dispatch-table line-table">
+          <thead>
+            <tr>
+              <th v-for="col in notice.tools_columns || []" :key="col.key">{{ col.label }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!(notice.tools_rows || []).length">
+              <td :colspan="Math.max((notice.tools_columns || []).length, 1)" class="order-dispatch-empty">
+                {{ lineEmptyNote('tools') }}
+              </td>
+            </tr>
+            <tr v-for="(row, index) in notice.tools_rows || []" :key="row.source_key || index">
+              <td v-for="col in notice.tools_columns || []" :key="col.key">
+                <HighlightText :text="cellText(row, col.key)" :query="query" />
               </td>
             </tr>
           </tbody>

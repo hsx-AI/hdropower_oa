@@ -1,28 +1,41 @@
 <script setup lang="ts">
 import { ref, reactive, watch, computed, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { api, fields, type NoticeRow } from '../api';
+import { api, type NoticeRow } from '../api';
 import HighlightText from '../components/HighlightText.vue';
+import TaskProgress from '../components/TaskProgress.vue';
 const route = useRoute(),
   router = useRouter();
-const filter = reactive({ q: '', field: 'all', start: '', end: '' });
+const filter = reactive({
+  q: '',
+  code: '',
+  creator: '',
+  kind: '',
+  classification: '',
+  dept: '',
+  work: '',
+  discarded: '',
+  start: '',
+  end: '',
+});
 const rows = ref<NoticeRow[]>([]),
   total = ref(0),
   loading = ref(false),
-  error = ref(''),
-  advanced = ref(false);
+  error = ref('');
 const page = computed(() => Math.max(1, Number(route.query.page) || 1));
 const pages = computed(() => Math.max(1, Math.ceil(total.value / 20)));
 const applied = computed(() => String(route.query.q || ''));
+const progressLabel = computed(() =>
+  applied.value || route.query.creator || route.query.work
+    ? '正在按条件检索通知单'
+    : '正在读取通知单列表',
+);
 let controller: AbortController | undefined;
-function label(key: string) {
-  return fields.find((f) => f[0] === key)?.[1] || '其他信息';
-}
 function cell(value?: string | null) {
   return value?.trim() ? value : '';
 }
 function timeText(value?: string | null) {
-  return cell(value).replace('T', ' ');
+  return cell(value).replace('T', ' ').replace(/:\d{2}$/, '');
 }
 function detailQuery(id: string) {
   return {
@@ -30,14 +43,24 @@ function detailQuery(id: string) {
     query: { ...route.query, from: route.fullPath },
   };
 }
+function statusOf(row: NoticeRow) {
+  if (row.is_discarded === '是') return { text: '已废弃', tone: 'bad' };
+  if (row.is_discarded === '否') return { text: '在用', tone: 'ok' };
+  return { text: '—', tone: '' };
+}
 async function load() {
   Object.assign(filter, {
     q: String(route.query.q || ''),
-    field: String(route.query.field || 'all'),
+    code: String(route.query.code || ''),
+    creator: String(route.query.creator || ''),
+    kind: String(route.query.kind || ''),
+    classification: String(route.query.classification || ''),
+    dept: String(route.query.dept || ''),
+    work: String(route.query.work || ''),
+    discarded: String(route.query.discarded || ''),
     start: String(route.query.start || ''),
     end: String(route.query.end || ''),
   });
-  if (filter.start || filter.end || filter.field !== 'all') advanced.value = true;
   controller?.abort();
   const current = new AbortController();
   controller = current;
@@ -70,12 +93,23 @@ function search() {
     error.value = '开始日期不能晚于结束日期';
     return;
   }
-  const query = Object.fromEntries(Object.entries(filter).filter(([, v]) => v));
+  const query = Object.fromEntries(Object.entries(filter).filter(([, value]) => value));
   if (JSON.stringify(route.query) === JSON.stringify(query)) void load();
   else void router.push({ path: '/notices', query });
 }
 function reset() {
-  Object.assign(filter, { q: '', field: 'all', start: '', end: '' });
+  Object.assign(filter, {
+    q: '',
+    code: '',
+    creator: '',
+    kind: '',
+    classification: '',
+    dept: '',
+    work: '',
+    discarded: '',
+    start: '',
+    end: '',
+  });
   search();
 }
 function go(p: number) {
@@ -85,126 +119,96 @@ watch(() => route.fullPath, load, { immediate: true });
 onBeforeUnmount(() => controller?.abort());
 </script>
 <template>
-  <section class="notice-hero">
-    <span class="eyebrow">通知单资料库</span>
-    <h1>找到你需要的那张通知单</h1>
-    <p>记得一段内容、一个工作号，或一个人的名字，都可以从这里开始。</p>
-    <form @submit.prevent="search">
-      <div class="notice-search">
-        <span aria-hidden="true">⌕</span
-        ><input
-          v-model="filter.q"
-          maxlength="200"
-          aria-label="搜索通知单"
-          placeholder="搜索通知内容、编号、工作号、人员…"
-        /><button class="btn primary" :disabled="loading">搜索通知单</button>
+  <section class="notice-board">
+    <header class="notice-board-head">
+      <div>
+        <h1>技术通知单</h1>
+        <p>按编号、原因、工作号、人员和日期直接定位，不必先翻完整张单。</p>
       </div>
-      <div class="search-help">
-        <span>支持部分文字匹配 · 多个关键词用空格分隔，结果同时包含这些关键词</span
-        ><button
-          type="button"
-          class="text-button"
-          @click="advanced = !advanced"
-          :aria-expanded="advanced"
-        >
-          {{ advanced ? '收起筛选 ↑' : '更多筛选 ↓' }}
-        </button>
-      </div>
-      <div v-if="advanced" class="advanced-search">
-        <label
-          >搜索范围<select v-model="filter.field">
-            <option v-for="f in fields" :key="f[0]" :value="f[0]">{{ f[1] }}</option>
-          </select></label
-        ><label>生效日期从<input type="date" v-model="filter.start" /></label
-        ><label>至<input type="date" v-model="filter.end" /></label
-        ><button type="button" class="btn" @click="reset">清空条件</button>
+      <strong v-if="!loading && !error">{{ total.toLocaleString() }} 条</strong>
+    </header>
+    <form class="notice-filters" @submit.prevent="search">
+      <label>关键词<input v-model="filter.q" maxlength="200" placeholder="原因、正文、人员" /></label>
+      <label>单据编号<input v-model="filter.code" maxlength="80" placeholder="如 2026水轮机…" /></label>
+      <label>编制人<input v-model="filter.creator" maxlength="64" placeholder="姓名" /></label>
+      <label>通知类别<input v-model="filter.kind" maxlength="64" placeholder="类别" /></label>
+      <label>分类<input v-model="filter.classification" maxlength="64" placeholder="水轮机 / 发电机" /></label>
+      <label>单位<input v-model="filter.dept" maxlength="64" placeholder="发出或提出单位" /></label>
+      <label>工作号<input v-model="filter.work" maxlength="64" placeholder="工作号 / 部套号" /></label>
+      <label
+        >是否废弃<select v-model="filter.discarded">
+          <option value="">全部</option>
+          <option value="否">在用</option>
+          <option value="是">已废弃</option>
+        </select></label
+      >
+      <label>生效从<input type="date" v-model="filter.start" /></label>
+      <label>至<input type="date" v-model="filter.end" /></label>
+      <div class="notice-filter-actions">
+        <button class="btn primary" :disabled="loading">查询</button>
+        <button type="button" class="btn" @click="reset">清空</button>
       </div>
     </form>
   </section>
-  <div class="results-heading">
-    <h2>
-      {{ applied ? '搜索结果' : '全部通知单' }}
-      <span v-if="!loading && !error">{{ total.toLocaleString() }} 条</span>
-    </h2>
-    <span>按生效时间由近到远</span>
-  </div>
+  <TaskProgress v-if="loading" :active="loading" :label="progressLabel" />
   <p v-if="error" role="alert" class="error-message">
     {{ error }} <button class="btn" @click="load">重新查询</button>
   </p>
-  <div v-else-if="loading" class="search-loading" role="status">
-    <div class="skeleton-table"><i></i><i></i><i></i><i></i></div>
-    <p>正在查找通知单…</p>
-  </div>
-  <section v-else-if="!rows.length" class="empty-search">
+  <section v-else-if="!loading && !rows.length" class="empty-search">
     <h2>没有找到符合条件的通知单</h2>
-    <p>试试缩短关键词、只输入工作号的一部分，或放宽日期范围。</p>
-    <button class="btn" @click="reset">清空筛选，查看全部</button>
+    <p>试试只填工作号或编制人，或放宽日期。</p>
+    <button class="btn" @click="reset">清空条件</button>
   </section>
-  <section v-else class="notice-grid-wrap">
-    <div class="notice-grid" role="table" aria-label="通知单列表">
-      <div class="notice-grid-head" role="row">
-        <span role="columnheader">#</span>
-        <span role="columnheader">项目名</span>
-        <span role="columnheader">编号</span>
-        <span role="columnheader">发出单位</span>
-        <span role="columnheader">改版单类别</span>
-        <span role="columnheader">编制人</span>
-        <span role="columnheader">编制时间</span>
-        <span role="columnheader">是否生效</span>
-        <span role="columnheader">生效时间</span>
-        <span role="columnheader">工作号部套号</span>
-        <span role="columnheader">是否废弃</span>
-        <span role="columnheader">废弃时间</span>
-        <span role="columnheader">操作</span>
-      </div>
-      <div v-for="(n, index) in rows" :key="n.id" class="notice-grid-row" role="row">
-        <span role="cell">{{ (page - 1) * 20 + index + 1 }}</span>
-        <span role="cell"
-          ><HighlightText :text="cell(n.project_name)" :query="applied"
-        /></span>
-        <span role="cell" class="notice-grid-code"
-          ><RouterLink :to="detailQuery(n.id)"
-            ><HighlightText :text="cell(n.code) || n.id" :query="applied" /></RouterLink
-        ></span>
-        <span role="cell"
-          ><HighlightText :text="cell(n.issue_dept) || cell(n.department)" :query="applied"
-        /></span>
-        <span role="cell"><HighlightText :text="cell(n.kind)" :query="applied" /></span>
-        <span role="cell"><HighlightText :text="cell(n.creator)" :query="applied" /></span>
-        <span role="cell">{{ timeText(n.create_time) }}</span>
-        <span role="cell">{{ cell(n.is_effective) }}</span>
-        <span role="cell">{{ timeText(n.execution_time) }}</span>
-        <span role="cell"
-          ><HighlightText :text="cell(n.work_number)" :query="applied"
-        /></span>
-        <span role="cell">{{ cell(n.is_discarded) }}</span>
-        <span role="cell">{{ timeText(n.discard_time) }}</span>
-        <span role="cell" class="notice-grid-actions"
-          ><RouterLink :to="detailQuery(n.id)">查看</RouterLink></span
-        >
-        <div
-          v-if="applied && n.matches?.length"
-          class="notice-grid-matches"
-          role="cell"
-        >
-          <details>
-            <summary>
-              关键词命中 {{ n.matches.length }}{{ n.matches.length === 6 ? '+' : '' }}
-            </summary>
-            <p v-for="(m, i) in n.matches" :key="i">
-              <strong>{{ label(m.field) }}</strong>
-              <HighlightText :text="m.text" :query="applied" />
-            </p>
-          </details>
-        </div>
-      </div>
-    </div>
+  <section v-else-if="rows.length" class="notice-table-wrap" :class="{ 'is-loading': loading }">
+    <table class="notice-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>单据编号</th>
+          <th>通知类别</th>
+          <th>通知原因</th>
+          <th>发出单位</th>
+          <th>编制人</th>
+          <th>分类</th>
+          <th>生效时间</th>
+          <th>工作号 / 部套号</th>
+          <th>提出部门</th>
+          <th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="(n, index) in rows" :key="n.id" @click="router.push(detailQuery(n.id))">
+          <td class="num">{{ (page - 1) * 20 + index + 1 }}</td>
+          <td class="code">
+            <RouterLink :to="detailQuery(n.id)" @click.stop>
+              <HighlightText :text="cell(n.code) || n.id" :query="applied" />
+            </RouterLink>
+          </td>
+          <td><HighlightText :text="cell(n.kind)" :query="applied" /></td>
+          <td class="reason" :title="cell(n.reason)">
+            <span><HighlightText :text="cell(n.reason) || '—'" :query="applied" /></span>
+          </td>
+          <td><HighlightText :text="cell(n.issue_dept) || cell(n.department)" :query="applied" /></td>
+          <td><HighlightText :text="cell(n.creator)" :query="applied" /></td>
+          <td><HighlightText :text="cell(n.classification) || cell(n.project_name)" :query="applied" /></td>
+          <td class="time">{{ timeText(n.execution_time) }}</td>
+          <td><HighlightText :text="cell(n.work_number)" :query="applied" /></td>
+          <td><HighlightText :text="cell(n.proposed_dept) || cell(n.department)" :query="applied" /></td>
+          <td>
+            <span v-if="statusOf(n).tone" class="state-pill" :class="statusOf(n).tone">{{
+              statusOf(n).text
+            }}</span>
+            <span v-else>—</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
   </section>
-  <nav v-if="!error && !loading && total" class="result-pagination" aria-label="结果翻页">
-    <span>第 {{ page }} / {{ pages }} 页 · 每页 20 条</span>
+  <nav v-if="!error && total" class="result-pagination" aria-label="结果翻页">
+    <span>第 {{ page }} / {{ pages }} 页 · 每页 20 条 · 点一行打开详情</span>
     <div>
-      <button class="btn" :disabled="page <= 1" @click="go(page - 1)">上一页</button
-      ><button class="btn" :disabled="page >= pages" @click="go(page + 1)">下一页</button>
+      <button class="btn" :disabled="page <= 1 || loading" @click="go(page - 1)">上一页</button
+      ><button class="btn" :disabled="page >= pages || loading" @click="go(page + 1)">下一页</button>
     </div>
   </nav>
 </template>

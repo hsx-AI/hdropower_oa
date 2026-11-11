@@ -41,8 +41,22 @@ class Notice(Base):
     digest = Column(String(64), nullable=False)
     updated_at = Column(DateTime, default=now, nullable=False)
     detail_synced_at = Column(DateTime)
-    __table_args__ = (Index('ix_notice_date_id', 'execution_time', 'id'),
-                      {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'})
+    parts_synced_at = Column(DateTime)
+    tools_synced_at = Column(DateTime)
+    # Compact columns for the list page. List queries must not read content/raw.
+    reason = Column(String(800), nullable=False, default='')
+    classification = Column(String(128), nullable=False, default='')
+    work_number = Column(String(512), nullable=False, default='')
+    discarded = Column(String(16), nullable=False, default='')
+    proposed_dept = Column(String(256), nullable=False, default='')
+    issue_dept = Column(String(256), nullable=False, default='')
+    list_ready = Column(Boolean, nullable=False, default=False)
+    __table_args__ = (
+        Index('ix_notice_date_id', 'execution_time', 'id'),
+        Index('ix_notice_creator', 'creator'),
+        Index('ix_notice_kind', 'kind'),
+        {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'},
+    )
 
 class SyncMonth(Base):
     __tablename__ = 'sync_months'
@@ -75,6 +89,19 @@ class NoticeDispatch(Base):
     __table_args__ = (Index('ux_notice_dispatch_key', 'notice_id', 'source_key', unique=True),
                       {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'})
 
+class NoticeLineItem(Base):
+    """Parts/process and tooling rows from on-demand detail queries."""
+    __tablename__ = 'notice_line_items'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    notice_id = Column(String(128, collation='utf8mb4_bin'), nullable=False, index=True)
+    kind = Column(String(16), nullable=False, default='parts')
+    source_key = Column(String(128, collation='utf8mb4_bin'), nullable=False, default='')
+    cells = Column(JSON, nullable=False)
+    digest = Column(String(64), nullable=False, default='')
+    updated_at = Column(DateTime, default=now, nullable=False)
+    __table_args__ = (Index('ux_notice_line_key', 'notice_id', 'kind', 'source_key', unique=True),
+                      {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'})
+
 class SyncRun(Base):
     __tablename__ = 'sync_runs'
     id = Column(String(36), primary_key=True)
@@ -98,6 +125,40 @@ def initialize(engine):
         columns = {column['name'] for column in inspect(engine).get_columns('notices')}
     except Exception:
         return
+    alters = []
     if 'detail_synced_at' not in columns:
+        alters.append('ADD COLUMN detail_synced_at DATETIME NULL')
+    if 'parts_synced_at' not in columns:
+        alters.append('ADD COLUMN parts_synced_at DATETIME NULL')
+    if 'tools_synced_at' not in columns:
+        alters.append('ADD COLUMN tools_synced_at DATETIME NULL')
+    if 'reason' not in columns:
+        alters.append("ADD COLUMN reason VARCHAR(800) NOT NULL DEFAULT ''")
+    if 'classification' not in columns:
+        alters.append("ADD COLUMN classification VARCHAR(128) NOT NULL DEFAULT ''")
+    if 'work_number' not in columns:
+        alters.append("ADD COLUMN work_number VARCHAR(512) NOT NULL DEFAULT ''")
+    if 'discarded' not in columns:
+        alters.append("ADD COLUMN discarded VARCHAR(16) NOT NULL DEFAULT ''")
+    if 'proposed_dept' not in columns:
+        alters.append("ADD COLUMN proposed_dept VARCHAR(256) NOT NULL DEFAULT ''")
+    if 'issue_dept' not in columns:
+        alters.append("ADD COLUMN issue_dept VARCHAR(256) NOT NULL DEFAULT ''")
+    if 'list_ready' not in columns:
+        alters.append('ADD COLUMN list_ready TINYINT(1) NOT NULL DEFAULT 0')
+    if alters:
         with engine.begin() as conn:
-            conn.execute(text('ALTER TABLE notices ADD COLUMN detail_synced_at DATETIME NULL'))
+            conn.execute(text('ALTER TABLE notices ' + ', '.join(alters)))
+    try:
+        existing = {index['name'] for index in inspect(engine).get_indexes('notices')}
+    except Exception:
+        return
+    index_sql = []
+    if 'ix_notice_creator' not in existing:
+        index_sql.append('CREATE INDEX ix_notice_creator ON notices (creator)')
+    if 'ix_notice_kind' not in existing:
+        index_sql.append('CREATE INDEX ix_notice_kind ON notices (kind)')
+    if index_sql:
+        with engine.begin() as conn:
+            for statement in index_sql:
+                conn.execute(text(statement))

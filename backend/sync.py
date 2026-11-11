@@ -26,11 +26,13 @@ def normalize(record):
     # that it is NOT an instruction to add eight hours. Preserve source filter semantics.
     timestamp = dt.datetime.fromisoformat(str(record['fExecutionTime']).replace('Z', '+00:00')).replace(tzinfo=None)
     canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    from .list_view import projection
     return {'id': key, 'code': str(record.get('fOrderCodeStr') or ''), 'execution_time': timestamp,
             'department': str(record.get('fProposedDept') or ''), 'creator': str(record.get('fCreatePerson') or ''),
             'kind': str(record.get('fOrderType') or ''), 'content': clean(record.get('fOrderContent')),
             'search_text': '\n'.join(clean(v) for v in record.values() if v is not None),
-            'raw': record, 'digest': hashlib.sha256(canonical.encode()).hexdigest(), 'updated_at': now()}
+            'raw': record, 'digest': hashlib.sha256(canonical.encode()).hexdigest(), 'updated_at': now(),
+            'list_ready': True, **projection(record)}
 
 def store_month(engine, month, records):
     rows = [normalize(r) for r in records]
@@ -130,12 +132,61 @@ def merge_detail_raw(engine, notice_id, record):
             import re
             notice.content = unescape(re.sub(r'<[^>]+>', ' ', str(record['fOrderContent'])))
         notice.search_text = '\n'.join(str(v) for v in merged.values() if v is not None)
+        from .list_view import apply_projection
+        apply_projection(notice, merged)
         notice.updated_at = now()
         notice.detail_synced_at = now()
         db.commit()
     return {'merged_fields': len(record or {})}
 
-def sync_detail(engine, notice_id, fetch=None):
+def _line_synced_at(notice, kind):
+    return getattr(notice, 'parts_synced_at' if kind == 'parts' else 'tools_synced_at', None)
+
+
+def _set_line_synced_at(engine, notice_id, kind):
+    from sqlalchemy.orm import Session
+    from .db import Notice, now
+    with Session(engine) as db:
+        notice = db.get(Notice, notice_id)
+        if notice is None:
+            return
+        stamp = now()
+        if kind == 'parts':
+            notice.parts_synced_at = stamp
+        else:
+            notice.tools_synced_at = stamp
+        db.commit()
+    return stamp
+
+
+def _sync_line_kind(engine, notice_id, kind, fetch_line=None, force=False, ttl_seconds=DETAIL_TTL_SECONDS):
+    from sqlalchemy.orm import Session
+    from .db import Notice, now
+    from .line_items_store import store_line_items
+    from .x5 import detail as detail_source
+    ready, reason = detail_source.line_template_ready(kind)
+    if not ready:
+        return {'status': 'skipped', 'reason': reason, 'received': 0, 'changed': 0}
+    with Session(engine) as db:
+        notice = db.get(Notice, notice_id)
+        synced = _line_synced_at(notice, kind) if notice else None
+        if (not force and synced and (now() - synced).total_seconds() < ttl_seconds):
+            return {'status': 'fresh', 'synced_at': synced.isoformat() + 'Z', 'received': 0, 'changed': 0}
+    try:
+        fetch = fetch_line or (lambda nid: detail_source.fetch_line_items(nid, kind))
+        records = fetch(notice_id)
+        stored = store_line_items(engine, notice_id, kind, records or [])
+        stamp = _set_line_synced_at(engine, notice_id, kind)
+        return {
+            'status': 'synced',
+            **stored,
+            'synced_at': stamp.isoformat() + 'Z' if stamp else None,
+        }
+    except Exception as exc:
+        return {'status': 'failed', 'error_type': type(exc).__name__, 'received': 0, 'changed': 0}
+
+
+def sync_detail(engine, notice_id, fetch=None, fetch_parts=None, fetch_tools=None):
     from .dispatch_store import store_dispatch
     from .x5 import detail as detail_source
     fetch = fetch or detail_source.fetch_detail
@@ -145,9 +196,13 @@ def sync_detail(engine, notice_id, fetch=None):
     # Detail action returns the master row; dispatch is a separate capture not present yet.
     merged = merge_detail_raw(engine, notice_id, records[0])
     dispatch = store_dispatch(engine, notice_id, records)
-    return {'notice_id': notice_id, **merged, **dispatch}
+    # Parts / tooling use separate captured queries; best-effort after master merge.
+    parts = _sync_line_kind(engine, notice_id, 'parts', fetch_line=fetch_parts, force=True)
+    tools = _sync_line_kind(engine, notice_id, 'tools', fetch_line=fetch_tools, force=True)
+    return {'notice_id': notice_id, **merged, **dispatch, 'parts': parts, 'tools': tools}
 
-def ensure_detail(engine, notice_id, force=False, ttl_seconds=DETAIL_TTL_SECONDS, fetch=None):
+def ensure_detail(engine, notice_id, force=False, ttl_seconds=DETAIL_TTL_SECONDS, fetch=None,
+                  fetch_parts=None, fetch_tools=None):
     """On-demand detail crawl when opening a notice. Skips hourly bulk; caches by detail_synced_at."""
     import hashlib
     import os
@@ -165,9 +220,6 @@ def ensure_detail(engine, notice_id, force=False, ttl_seconds=DETAIL_TTL_SECONDS
         notice = db.get(Notice, notice_id)
         if notice is None:
             return {'status': 'missing'}
-        synced = notice.detail_synced_at
-        if (not force and synced and (now() - synced).total_seconds() < ttl_seconds):
-            return {'status': 'fresh', 'synced_at': synced.isoformat() + 'Z'}
 
     lock_name = 'hoa_dt_' + hashlib.sha256(notice_id.encode()).hexdigest()[:20]
     with engine.connect() as conn:
@@ -181,9 +233,26 @@ def ensure_detail(engine, notice_id, force=False, ttl_seconds=DETAIL_TTL_SECONDS
             with Session(engine) as db:
                 notice = db.get(Notice, notice_id)
                 synced = notice.detail_synced_at if notice else None
-                if (not force and synced and (now() - synced).total_seconds() < ttl_seconds):
-                    return {'status': 'fresh', 'synced_at': synced.isoformat() + 'Z'}
-            result = sync_detail(engine, notice_id, fetch=fetch)
+                master_fresh = bool(
+                    not force and synced and (now() - synced).total_seconds() < ttl_seconds
+                )
+            if master_fresh:
+                # Master sheet can stay cached; still backfill parts/tools if their own TTL expired.
+                parts = _sync_line_kind(
+                    engine, notice_id, 'parts', fetch_line=fetch_parts, force=force,
+                )
+                tools = _sync_line_kind(
+                    engine, notice_id, 'tools', fetch_line=fetch_tools, force=force,
+                )
+                return {
+                    'status': 'fresh',
+                    'synced_at': synced.isoformat() + 'Z',
+                    'parts': parts,
+                    'tools': tools,
+                }
+            result = sync_detail(
+                engine, notice_id, fetch=fetch, fetch_parts=fetch_parts, fetch_tools=fetch_tools,
+            )
             return {'status': 'synced', **result}
         except Exception as exc:
             return {'status': 'failed', 'error_type': type(exc).__name__}

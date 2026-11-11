@@ -2,8 +2,12 @@ import datetime as dt
 from types import SimpleNamespace
 from pathlib import Path
 import pytest
-from backend.detail_view import detail_header, detail_cost, parse_dispatch_records
-from backend.x5.detail import read_detail_template, bind_notice_filter, DetailRequestError
+from backend.detail_view import (
+    detail_header, detail_cost, parse_dispatch_records, parse_line_records, line_columns,
+)
+from backend.x5.detail import (
+    read_detail_template, read_line_template, bind_notice_filter, DetailRequestError,
+)
 
 
 def notice_obj(**raw_extra):
@@ -72,14 +76,79 @@ def test_ensure_detail_on_demand_cache(tmp_path, monkeypatch):
         return [{'HEC_TechnologyOrder': 'A', 'fOrderCodeStr': 'TZ-A', 'Supplementary_documents': '非补件',
                  'fCreateCompany': '智能制造工艺部', 'fOrderTypeStr': 'J - 转发', 'Estimated_cost': '1'}]
 
-    first = sync_mod.ensure_detail(engine, 'A', fetch=fetch)
-    second = sync_mod.ensure_detail(engine, 'A', fetch=fetch)
-    forced = sync_mod.ensure_detail(engine, 'A', force=True, fetch=fetch)
+    empty = lambda _id: []
+    first = sync_mod.ensure_detail(engine, 'A', fetch=fetch, fetch_parts=empty, fetch_tools=empty)
+    second = sync_mod.ensure_detail(engine, 'A', fetch=fetch, fetch_parts=empty, fetch_tools=empty)
+    forced = sync_mod.ensure_detail(
+        engine, 'A', force=True, fetch=fetch, fetch_parts=empty, fetch_tools=empty,
+    )
     assert first['status'] == 'synced' and second['status'] == 'fresh' and forced['status'] == 'synced'
     assert calls['n'] == 2
     with Session(engine) as db:
         assert db.get(Notice, 'A').detail_synced_at is not None
         assert db.get(Notice, 'A').raw.get('Supplementary_documents') == '非补件'
+
+
+def test_ensure_detail_stores_parts_and_tools(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import Session
+    from sqlalchemy.pool import StaticPool
+    from backend.db import Base, Notice, NoticeLineItem, initialize, now
+    from backend import sync as sync_mod
+
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+
+    @event.listens_for(engine, 'connect')
+    def collations(conn, _):
+        conn.create_collation('utf8mb4_bin', lambda a, b: (a > b) - (a < b))
+
+    initialize(engine)
+    with Session(engine) as db:
+        db.add(Notice(
+            id='A', code='TZ-A', execution_time=dt.datetime(2026, 10, 1), department='测试部门',
+            creator='合成', kind='工艺', content='正文', search_text='正文', raw={'fOrderCodeStr': 'TZ-A'},
+            digest='0' * 64, updated_at=now(),
+        ))
+        db.commit()
+
+    monkeypatch.setattr('backend.x5.detail.template_ready', lambda: (True, str(tmp_path)))
+    monkeypatch.setattr('backend.x5.detail.line_template_ready', lambda kind: (True, kind))
+
+    def fetch(_id):
+        return [{'HEC_TechnologyOrder': 'A', 'fOrderCodeStr': 'TZ-A'}]
+
+    def fetch_parts(_id):
+        return [{
+            'HEC_TechnologyTechnicsAndPart': 'P1', 'fPartName': '导叶', 'fPartFigureNum': 'T-01',
+            'fAmount': '2', 'fProcessName': '精加工',
+        }]
+
+    def fetch_tools(_id):
+        return [{
+            'HEC_TechnologyTechnicsAndPart2': 'T1', 'fProcessToolNo': 'GZ-9', 'fEquipment': '立车',
+            'fProcessName': '粗车',
+        }]
+
+    result = sync_mod.ensure_detail(
+        engine, 'A', fetch=fetch, fetch_parts=fetch_parts, fetch_tools=fetch_tools,
+    )
+    assert result['status'] == 'synced'
+    assert result['parts']['received'] == 1
+    assert result['tools']['received'] == 1
+    from sqlalchemy import select
+    with Session(engine) as db:
+        parts = db.scalars(select(NoticeLineItem).where(NoticeLineItem.kind == 'parts')).all()
+        tools = db.scalars(select(NoticeLineItem).where(NoticeLineItem.kind == 'tools')).all()
+        assert parts[0].cells['fPartName'] == '导叶'
+        assert tools[0].cells['fProcessToolNo'] == 'GZ-9'
+
+
+def test_parse_line_records_and_columns():
+    rows = parse_line_records('A', 'parts', [{
+        'HEC_TechnologyTechnicsAndPart': 'P1', 'fPartName': '导叶', 'fAmount': '2',
+    }])
+    assert rows[0]['cells']['fPartName'] == '导叶'
+    assert line_columns('tools')[0]['key'] == 'fProcessNumber'
 
 
 def test_detail_template_bind(tmp_path):
@@ -95,3 +164,18 @@ def test_detail_template_bind(tmp_path):
     assert "HEC_TechnologyOrder = 'ABC''1'" in bound['payload']['parameters']['filter']
     with pytest.raises(DetailRequestError):
         read_detail_template(tmp_path / 'missing.txt')
+
+
+def test_parts_template_bind(tmp_path):
+    curl = (
+        'curl "http://capture.invalid/x5/UI2/v_test/system/service/common/bizAction.j" '
+        '--data-raw "{\\"action\\":\\"queryHEC_TechnologyTechnicsAndPartAction\\",\\"process\\":\\"p\\",'
+        '\\"activity\\":\\"a\\",\\"parameters\\":{\\"filter\\":\\"(HEC_TechnologyTechnicsAndPart.fMasterID=\'OLD\')\\",'
+        '\\"offset\\":0,\\"limit\\":-1},\\"translateParameter\\":{\\"rowsConfig\\":{\\"concept\\":'
+        '\\"HEC_TechnologyTechnicsAndPart\\"}}}"'
+    )
+    path = tmp_path / 'detail-parts-request1.txt'
+    path.write_text(curl, encoding='utf-8')
+    template = read_line_template(path, 'parts')
+    bound = bind_notice_filter(template, 'NEW1')
+    assert "HEC_TechnologyTechnicsAndPart.fMasterID = 'NEW1'" in bound['payload']['parameters']['filter']

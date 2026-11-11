@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { api } from '../api';
 import Icon from '../components/Icon.vue';
+import TaskProgress from '../components/TaskProgress.vue';
 type Status = 'ok' | 'warning' | 'error' | 'unknown' | 'running';
 interface Check {
   status: Status;
@@ -16,6 +17,29 @@ interface Run {
   failed_months: number;
   error_types: Record<string, number>;
 }
+interface DetailReady extends Check {
+  master_template?: boolean;
+  parts_template?: boolean;
+  tools_template?: boolean;
+  sample_notice_id?: string | null;
+  sample_notice_code?: string | null;
+}
+interface ProbePart {
+  status: Status | 'skipped';
+  record_count?: number;
+  latency_ms?: number;
+  error_type?: string;
+}
+interface DetailProbeResult extends Check {
+  notice_id?: string;
+  notice_code?: string | null;
+  latency_ms?: number;
+  timeout_seconds?: number;
+  persisted?: boolean;
+  master?: ProbePart;
+  parts?: ProbePart;
+  tools?: ProbePart;
+}
 interface Snapshot {
   checked_at: string;
   overall: Status;
@@ -23,6 +47,7 @@ interface Snapshot {
   refresh_after_seconds: number;
   api: Check;
   source: Check & { port?: number };
+  detail: DetailReady;
   services: (Check & {
     id: string;
     name: string;
@@ -43,13 +68,18 @@ interface Snapshot {
 const data = ref<Snapshot | null>(null),
   loading = ref(false),
   error = ref(''),
-  automatic = ref(true);
+  automatic = ref(true),
+  probeId = ref(''),
+  probing = ref(false),
+  probeError = ref(''),
+  probeResult = ref<DetailProbeResult | null>(null);
 const labels: Record<string, string> = {
   ok: '正常',
   warning: '需关注',
   error: '异常',
   unknown: '未确认',
   running: '进行中',
+  skipped: '已跳过',
   success: '成功',
   partial_failure: '部分失败',
   interrupted: '已中断',
@@ -74,6 +104,7 @@ const units = computed(() =>
         ...data.value.services,
         { ...data.value.database, id: 'database', name: '数据库查询' },
         { ...data.value.source, id: 'source', name: '源系统网络' },
+        { ...data.value.detail, id: 'detail', name: '详情爬取模板' },
       ]
     : [],
 );
@@ -103,6 +134,29 @@ async function refresh() {
     loading.value = false;
   }
 }
+async function runDetailProbe() {
+  if (probing.value) return;
+  probing.value = true;
+  probeError.value = '';
+  probeResult.value = null;
+  try {
+    const body = { notice_id: probeId.value.trim() };
+    probeResult.value = await api<DetailProbeResult>('/admin/health/detail-probe', undefined, body);
+    if (!probeId.value.trim() && probeResult.value.notice_id) {
+      probeId.value = probeResult.value.notice_id;
+    }
+  } catch (e) {
+    probeError.value = e instanceof Error ? e.message : '详情爬取探测失败';
+  } finally {
+    probing.value = false;
+  }
+}
+
+function fillSampleId() {
+  const sample = data.value?.detail?.sample_notice_id;
+  if (sample) probeId.value = sample;
+}
+
 onMounted(() => {
   void refresh();
   interval = setInterval(() => {
@@ -174,7 +228,98 @@ onBeforeUnmount(() => {
           <p v-if="unit.id === 'source' && data.source.port" class="health-caption">
             目标端口 {{ data.source.port }} · 只检查连接，不采集业务数据
           </p>
+          <dl v-if="unit.id === 'detail'">
+            <div>
+              <dt>主单模板</dt>
+              <dd>{{ data.detail.master_template ? '已就绪' : '缺失' }}</dd>
+            </div>
+            <div>
+              <dt>零件模板</dt>
+              <dd>{{ data.detail.parts_template ? '已就绪' : '缺失' }}</dd>
+            </div>
+            <div>
+              <dt>工装模板</dt>
+              <dd>{{ data.detail.tools_template ? '已就绪' : '缺失' }}</dd>
+            </div>
+          </dl>
+          <p v-if="unit.id === 'detail' && data.detail.sample_notice_id" class="health-caption">
+            可试探样例：{{ data.detail.sample_notice_code || data.detail.sample_notice_id }}
+          </p>
         </article>
+      </section>
+      <section class="health-probe">
+        <header>
+          <div>
+            <h2>通知单详情爬取探测</h2>
+            <p>手动验证某一单的源详情登录与查询是否通畅；不写库、不进入小时同步。</p>
+          </div>
+          <span
+            v-if="probeResult"
+            class="health-badge"
+            :class="probeResult.status"
+            >{{ labels[probeResult.status] || '未确认' }}</span
+          >
+        </header>
+        <form class="health-probe-form" @submit.prevent="runDetailProbe">
+          <label class="filter-field grow">
+            通知单主键（HEC_TechnologyOrder）
+            <input
+              v-model="probeId"
+              type="text"
+              maxlength="128"
+              placeholder="留空则使用库内最新一条"
+              autocomplete="off"
+            />
+          </label>
+          <div class="health-probe-actions">
+            <button type="button" class="btn" :disabled="!data.detail.sample_notice_id" @click="fillSampleId">
+              填入样例
+            </button>
+            <button type="submit" class="btn primary" :disabled="probing">
+              {{ probing ? '正在探测…' : '测试详情爬取' }}
+            </button>
+          </div>
+        </form>
+        <TaskProgress v-if="probing" :active="probing" label="正在连接源系统并试读这一单的详情、零件和工装" />
+        <p v-if="probeError" class="error-message" role="alert">{{ probeError }}</p>
+        <div v-if="probeResult" class="health-probe-result">
+          <p>{{ probeResult.message }}</p>
+          <dl>
+            <div>
+              <dt>通知单</dt>
+              <dd>{{ probeResult.notice_code || probeResult.notice_id || '—' }}</dd>
+            </div>
+            <div>
+              <dt>总耗时</dt>
+              <dd>{{ probeResult.latency_ms ?? '—' }} ms</dd>
+            </div>
+            <div>
+              <dt>主单</dt>
+              <dd>
+                {{ labels[probeResult.master?.status || 'unknown'] || probeResult.master?.status }}
+                · {{ probeResult.master?.record_count ?? 0 }} 条
+                <span v-if="probeResult.master?.error_type">（{{ probeResult.master.error_type }}）</span>
+              </dd>
+            </div>
+            <div>
+              <dt>零件</dt>
+              <dd>
+                {{ labels[probeResult.parts?.status || 'unknown'] || probeResult.parts?.status }}
+                · {{ probeResult.parts?.record_count ?? 0 }} 条
+                <span v-if="probeResult.parts?.error_type">（{{ probeResult.parts.error_type }}）</span>
+              </dd>
+            </div>
+            <div>
+              <dt>工装</dt>
+              <dd>
+                {{ labels[probeResult.tools?.status || 'unknown'] || probeResult.tools?.status }}
+                · {{ probeResult.tools?.record_count ?? 0 }} 条
+                <span v-if="probeResult.tools?.error_type">（{{ probeResult.tools.error_type }}）</span>
+              </dd>
+            </div>
+          </dl>
+          <p class="health-caption">探测结果不落库；超时约 {{ probeResult.timeout_seconds ?? 20 }} 秒。</p>
+        </div>
       </section>
       <section class="health-sync">
         <header>
@@ -266,7 +411,7 @@ onBeforeUnmount(() => {
         源系统连接超时：检查服务器到源系统的网络、端口与防火墙。最近同步失败：查看失败月份与错误类型，再在服务器核对采集日志。服务未运行：由管理员在服务器检查对应服务。
       </p>
       <p>
-        本页为只读检查，不会重启服务或触发采集。检查结果在后台缓存 30
+        本页默认只读检查，不会重启服务或触发小时同步。上方「测试详情爬取」为管理员显式探测，会登录源系统查询一单详情（不写库）。检查结果在后台缓存 30
         秒，自动刷新仅在页面可见时进行。API
         或数据库整体故障时，本页也可能无法读取，应从服务器终端检查。
       </p>
@@ -365,6 +510,7 @@ onBeforeUnmount(() => {
 }
 .health-card,
 .health-sync,
+.health-probe,
 .health-history,
 .health-notes {
   border: 1px solid #e1e7ef;
@@ -373,7 +519,8 @@ onBeforeUnmount(() => {
   padding: 24px;
 }
 .health-card header,
-.health-sync > header {
+.health-sync > header,
+.health-probe > header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -381,10 +528,66 @@ onBeforeUnmount(() => {
 }
 .health-card h2,
 .health-sync h2,
+.health-probe h2,
 .health-history h2,
 .health-notes h2 {
   font-size: 15px;
   margin: 0;
+}
+.health-probe {
+  margin-bottom: 24px;
+}
+.health-probe > header p {
+  margin: 8px 0 0;
+  color: #738198;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.health-probe-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: end;
+  margin-top: 18px;
+}
+.health-probe-form .filter-field {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+.health-probe-form input {
+  width: 100%;
+}
+.health-probe-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.health-probe-result {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #edf1f6;
+}
+.health-probe-result > p {
+  margin: 0 0 12px;
+  color: #4a5d75;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.health-probe-result dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 18px;
+  margin: 0;
+}
+.health-probe-result dt {
+  font-size: 11px;
+  color: #8a97a8;
+}
+.health-probe-result dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: #24384f;
+  overflow-wrap: anywhere;
 }
 .health-card > p {
   font-size: 13px;

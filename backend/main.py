@@ -13,16 +13,22 @@ from .db import Notice, Tracking, SyncRun, SyncMonth, engine_from_env
 from .auth import authorize, login, logout
 from .db import initialize
 from .content import plain_text
-from .detail_view import detail_cost, detail_header, dispatch_from_rows, parse_dispatch_records
+from .detail_view import (
+    detail_cost, detail_header, dispatch_from_rows, line_columns, line_rows_from_stored,
+    parse_dispatch_records,
+)
 from .dispatch_store import load_dispatch
+from .line_items_store import load_line_items
 from .sync import ensure_detail
-from .admin_health import HealthMonitor
+from .list_view import hydrate_page, search_index_ready, start_list_prepare
+from .admin_health import HealthMonitor, probe_notice_detail
 
 @asynccontextmanager
 async def lifespan(app):
     app.state.engine = engine_from_env()
     initialize(app.state.engine)
     app.state.health_monitor = HealthMonitor()
+    start_list_prepare(app.state.engine)
     yield
     app.state.engine.dispose()
 
@@ -63,6 +69,16 @@ def admin_health(request: Request, response: Response, user=Depends(administrato
     response.headers['Cache-Control'] = 'no-store'
     return request.app.state.health_monitor.get(request.app.state.engine)
 
+class DetailProbeInput(BaseModel):
+    notice_id: str = Field(default='', max_length=128)
+
+@app.post('/api/admin/health/detail-probe')
+def admin_detail_probe(body: DetailProbeInput, request: Request, response: Response,
+                       user=Depends(administrator)):
+    """Explicit live probe of one notice's detail crawl; does not persist source rows."""
+    response.headers['Cache-Control'] = 'no-store'
+    return probe_notice_detail(request.app.state.engine, body.notice_id or None)
+
 def view(n):
     return {'id': n.id, 'code': n.code, 'execution_time': n.execution_time.isoformat(),
             'department': n.department, 'creator': n.creator, 'kind': n.kind,
@@ -97,26 +113,59 @@ def excerpt(value, tokens, length=320):
     start = max(0, min(hits) - 75) if hits else 0
     return ('…' if start else '') + value[start:start+length] + ('…' if len(value) > start+length else '')
 
-def listing(n, tokens, field):
-    raw = n.raw or {}
+def like_pattern(token):
+    return '%' + token.replace('!', '!!').replace('%', '!%').replace('_', '!_') + '%'
+
+def listing(n, tokens, field, extra=None):
+    raw = (extra.raw if extra is not None and extra.raw is not None else None)
+    if raw is None:
+        raw = getattr(n, 'raw', None) or {}
+    has_raw = bool(raw)
     matches = [{'field': key, 'text': excerpt(value, tokens)} for key, value in raw.items()
-               if (field == 'all' or key == field) and tokens
+               if has_raw and (field == 'all' or key == field) and tokens
                and any(t.lower() in clean(value).lower() for t in tokens)]
-    create_time = pick(raw, 'fCreateTimeStr', 'fBillTimeStr', 'fCreateTime', 'fBillTime')
+    create_time = pick(raw, 'fCreateTimeStr', 'fBillTimeStr', 'fCreateTime', 'fBillTime') if has_raw else ''
     if create_time.endswith('Z') and 'T' in create_time:
         create_time = create_time.replace('T', ' ').rstrip('Z')
-    return {**view(n), 'preview': excerpt(n.content, tokens),
-            'work_number': pick(raw, 'fWorkPartNumStr') or clean(raw.get('fWorkPartNumStr')),
-            'reason': excerpt(raw.get('fOrderCause'), tokens, 180), 'matches': matches[:6],
-            'project_name': pick(raw, 'fProjectName', 'fProject', 'fName', 'fBillName', 'fClassification'),
-            'issue_dept': pick(raw, 'fCreateDeptName', 'fProposedDept') or n.department,
+    reason = excerpt(raw.get('fOrderCause'), tokens, 180) if has_raw and raw.get('fOrderCause') else (getattr(n, 'reason', '') or '')
+    content = extra.content if extra is not None else getattr(n, 'content', '')
+    preview_source = content if content else reason
+    return {**view(n), 'preview': excerpt(preview_source, tokens) if preview_source else '',
+            'work_number': (pick(raw, 'fWorkPartNumStr') if has_raw else '') or getattr(n, 'work_number', '') or '',
+            'reason': reason, 'matches': matches[:6],
+            'classification': getattr(n, 'classification', '') or (pick(raw, 'fClassification') if has_raw else ''),
+            'project_name': getattr(n, 'classification', '') or (pick(raw, 'fClassification') if has_raw else ''),
+            'issue_dept': getattr(n, 'issue_dept', '') or (pick(raw, 'fCreateDeptName', 'fProposedDept') if has_raw else '') or n.department,
+            'proposed_dept': getattr(n, 'proposed_dept', '') or (pick(raw, 'fProposedDept') if has_raw else '') or n.department,
             'create_time': create_time,
-            'is_effective': flag_text(raw.get('fIsExecution')) or pick(raw, 'fIsExecution'),
-            'is_discarded': flag_text(pick(raw, 'fIsAbolish', 'fAbolish', 'fIsDiscard', 'fDiscarded', 'fIsInvalid')),
-            'discard_time': pick(raw, 'fAbolishTimeStr', 'fDiscardTimeStr', 'fAbolishTime', 'fDiscardTime', 'fInvalidTime')}
+            'is_effective': flag_text(raw.get('fIsExecution')) if has_raw else '',
+            'is_discarded': getattr(n, 'discarded', '') or (flag_text(pick(raw, 'fIsAbolish', 'fAbolish', 'fIsDiscard', 'fDiscarded', 'fIsInvalid')) if has_raw else ''),
+            'discard_time': pick(raw, 'fAbolishTimeStr', 'fDiscardTimeStr', 'fAbolishTime', 'fDiscardTime', 'fInvalidTime') if has_raw else ''}
+
+LIST_COLUMNS = (
+    Notice.id, Notice.code, Notice.execution_time, Notice.department, Notice.creator, Notice.kind,
+    Notice.updated_at, Notice.reason, Notice.classification, Notice.work_number, Notice.discarded,
+    Notice.proposed_dept, Notice.issue_dept, Notice.list_ready,
+)
+
+def keyword_clause(db, tokens, field):
+    if not tokens:
+        return []
+    if field != 'all':
+        column = func.json_unquote(func.json_extract(Notice.raw, '$.' + field))
+        return [column.like(like_pattern(token), escape='!') for token in tokens]
+    unsafe = any(len(token) < 2 or any(ch in token for ch in '%_+-><()~*"') for token in tokens)
+    if not unsafe and search_index_ready(db.get_bind()):
+        query = ' '.join('+' + token for token in tokens)
+        return [text('MATCH (search_text) AGAINST (:fts IN BOOLEAN MODE)').bindparams(fts=query)]
+    return [Notice.search_text.like(like_pattern(token), escape='!') for token in tokens]
 
 @app.get('/api/notices')
 def notices(q: str = Query('', max_length=200), field: str = Query('all', pattern=r'^[A-Za-z_][A-Za-z0-9_]{0,63}$'),
+            code: str = Query('', max_length=80),
+            creator: str = Query('', max_length=64), kind: str = Query('', max_length=64),
+            classification: str = Query('', max_length=64), dept: str = Query('', max_length=64),
+            work: str = Query('', max_length=64), discarded: str = Query('', pattern=r'^(|是|否)$'),
             start: dt.date | None = None, end: dt.date | None = None,
             page: int = Query(1, ge=1, le=100000), size: int = Query(50, ge=1, le=200), db: Session = Depends(session)):
     if start and end and start > end:
@@ -129,19 +178,41 @@ def notices(q: str = Query('', max_length=200), field: str = Query('all', patter
             conditions.append(Notice.execution_time <= dt.datetime.max)
         else:
             conditions.append(Notice.execution_time < dt.datetime.combine(end + dt.timedelta(days=1), dt.time()))
+    if code.strip():
+        conditions.append(Notice.code.like(like_pattern(code.strip()), escape='!'))
+    if creator.strip():
+        conditions.append(Notice.creator.like(like_pattern(creator.strip()), escape='!'))
+    if kind.strip():
+        conditions.append(Notice.kind.like(like_pattern(kind.strip()), escape='!'))
+    if classification.strip():
+        conditions.append(Notice.classification.like(like_pattern(classification.strip()), escape='!'))
+    if dept.strip():
+        pattern = like_pattern(dept.strip())
+        conditions.append((Notice.issue_dept.like(pattern, escape='!')) | (Notice.department.like(pattern, escape='!'))
+                          | (Notice.proposed_dept.like(pattern, escape='!')))
+    if work.strip():
+        conditions.append(Notice.work_number.like(like_pattern(work.strip()), escape='!'))
+    if discarded:
+        conditions.append(Notice.discarded == discarded)
     tokens = list(dict.fromkeys(q.split()))
     if len(tokens) > 12:
         raise HTTPException(422, '一次最多搜索12个关键词，请减少关键词后重试')
-    column = Notice.search_text if field == 'all' else func.json_unquote(func.json_extract(Notice.raw, '$.' + field))
-    for token in tokens:
-        pattern = '%' + token.replace('!', '!!').replace('%', '!%').replace('_', '!_') + '%'
-        conditions.append(column.like(pattern, escape='!'))
+    conditions.extend(keyword_clause(db, tokens, field))
     total = db.scalar(select(func.count()).select_from(Notice).where(*conditions))
-    # Read content only for this bounded page, to return snippets around matching words.
-    columns = [Notice.id, Notice.code, Notice.execution_time, Notice.department, Notice.creator, Notice.kind, Notice.updated_at, Notice.content, Notice.raw]
-    rows = db.execute(select(*columns).where(*conditions).order_by(desc(Notice.execution_time), Notice.id)
+    rows = db.execute(select(*LIST_COLUMNS).where(*conditions).order_by(desc(Notice.execution_time), Notice.id)
                       .offset((page - 1) * size).limit(size)).all()
-    return {'total': total, 'page': page, 'size': size, 'items': [listing(n, tokens, field) for n in rows]}
+    pending = [row.id for row in rows if not row.list_ready]
+    if pending:
+        hydrate_page(db, pending)
+        rows = db.execute(select(*LIST_COLUMNS).where(*conditions).order_by(desc(Notice.execution_time), Notice.id)
+                          .offset((page - 1) * size).limit(size)).all()
+    extras = {}
+    if tokens and rows:
+        loaded = db.execute(select(Notice.id, Notice.raw, Notice.content).where(
+            Notice.id.in_([row.id for row in rows]))).all()
+        extras = {row.id: row for row in loaded}
+    return {'total': total, 'page': page, 'size': size,
+            'items': [listing(n, tokens, field, extras.get(n.id)) for n in rows]}
 
 def detail_payload(db, notice_id, sync_info=None):
     n = db.get(Notice, notice_id)
@@ -156,12 +227,19 @@ def detail_payload(db, notice_id, sync_info=None):
             {k: r[k] for k in ('dept_path', 'preferred_receiver', 'receiver', 'received_at')}
             for r in parse_dispatch_records(notice_id, n.raw or {})
         ]
+    parts_rows = line_rows_from_stored(load_line_items(db, notice_id, 'parts'))
+    tools_rows = line_rows_from_stored(load_line_items(db, notice_id, 'tools'))
+    sync = sync_info or {'status': 'idle'}
     header = detail_header(n)
     cost = detail_cost(n.raw or {})
     return {**view(n), 'content': plain_text((n.raw or {}).get('fOrderContent') or n.content),
             'fields': n.raw, 'detail_header': header, 'cost': cost, 'dispatch_rows': dispatch_rows,
             'dispatch_pending': len(dispatch_rows) == 0,
-            'detail_sync': sync_info or {'status': 'idle'},
+            'parts_columns': line_columns('parts'), 'parts_rows': parts_rows,
+            'tools_columns': line_columns('tools'), 'tools_rows': tools_rows,
+            'parts_sync': sync.get('parts') or {'status': 'idle'},
+            'tools_sync': sync.get('tools') or {'status': 'idle'},
+            'detail_sync': sync,
             'detail_synced_at': n.detail_synced_at.isoformat() + 'Z' if n.detail_synced_at else None,
             'tracking': [{'id': t.id, 'status': t.status, 'note': t.note, 'author': t.author,
                           'created_at': t.created_at.isoformat() + 'Z'} for t in logs]}

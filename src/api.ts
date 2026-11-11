@@ -54,6 +54,8 @@ export interface NoticeRow {
   reason: string;
   work_number: string;
   project_name: string;
+  classification?: string;
+  proposed_dept?: string;
   issue_dept: string;
   create_time: string;
   is_effective: string;

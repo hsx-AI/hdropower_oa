@@ -87,9 +87,65 @@ def test_monitor_cache_and_independent_statuses(monkeypatch):
     monkeypatch.setattr(health,'database_snapshot',lambda engine:calls.append('db') or {'status':'ok','sync':{'status':'error'}})
     monkeypatch.setattr(health,'system_services',lambda:[{'status':'ok'}])
     monkeypatch.setattr(health,'source_connection',lambda:{'status':'ok'})
+    monkeypatch.setattr(health,'detail_templates_status',lambda engine:{'status':'ok','message':'ready'})
     monitor=health.HealthMonitor()
     first=monitor.get(None)
     assert first['overall']=='error' and first['cached'] is False
+    assert first['detail']['status']=='ok'
     assert monitor.get(None)['cached'] is True and calls==['db']
     monitor.expires=0
     assert monitor.get(None)['cached'] is False and calls==['db','db']
+
+
+def test_detail_templates_status_reports_missing_master(tmp_path, monkeypatch, client):
+    monkeypatch.setenv('X5_DETAIL_REQUEST_PATH', str(tmp_path / 'missing.txt'))
+    monkeypatch.setenv('X5_PARTS_REQUEST_PATH', str(tmp_path / 'missing-parts.txt'))
+    monkeypatch.setenv('X5_TOOLS_REQUEST_PATH', str(tmp_path / 'missing-tools.txt'))
+    result = health.detail_templates_status(client.test_engine)
+    assert result['status'] == 'error'
+    assert result['master_template'] is False
+
+
+def test_probe_notice_detail_uses_fetch_hooks(monkeypatch, client):
+    from backend.db import Notice
+    monkeypatch.setenv('OA_DETAIL_ON_DEMAND', '1')
+    with Session(client.test_engine) as db:
+        db.add(Notice(
+            id='PROBE1', code='TZ-PROBE', execution_time=dt.datetime(2026, 11, 1),
+            department='测试', creator='合成', kind='工艺', content='正文', search_text='正文',
+            raw={'fOrderCodeStr': 'TZ-PROBE'}, digest='1' * 64, updated_at=now(),
+        ))
+        db.commit()
+
+    monkeypatch.setattr(health, 'detail_templates_status', lambda engine: {
+        'status': 'ok', 'message': 'ready', 'master_template': True, 'parts_template': True,
+        'tools_template': True, 'sample_notice_id': 'PROBE1', 'sample_notice_code': 'TZ-PROBE',
+    })
+
+    class FakeDetail:
+        @staticmethod
+        def fetch_detail(notice_id, overrides=None):
+            assert notice_id == 'PROBE1'
+            assert overrides['query_timeout_seconds'] <= 60
+            return [{'HEC_TechnologyOrder': 'PROBE1', 'fOrderCodeStr': 'TZ-PROBE'}]
+
+        @staticmethod
+        def fetch_line_items(notice_id, kind, overrides=None):
+            return [{'id': kind}]
+
+    import backend.x5.detail as detail_mod
+    monkeypatch.setattr('backend.x5.detail.fetch_detail', FakeDetail.fetch_detail)
+    monkeypatch.setattr('backend.x5.detail.fetch_line_items', FakeDetail.fetch_line_items)
+    # probe imports detail inside function; patch module used via from .x5 import detail
+    monkeypatch.setattr('backend.x5.detail.template_ready', lambda: (True, 'x'))
+    result = health.probe_notice_detail(client.test_engine, 'PROBE1')
+    assert result['status'] == 'ok'
+    assert result['master']['record_count'] == 1
+    assert result['parts']['record_count'] == 1
+    assert result['persisted'] is False
+    assert 'PRIVATE' not in json.dumps(result)
+
+    sign_in(client)
+    response = client.post('/api/admin/health/detail-probe', json={'notice_id': 'PROBE1'})
+    assert response.status_code == 200
+    assert response.json()['status'] == 'ok'

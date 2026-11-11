@@ -132,3 +132,86 @@ def parse_dispatch_records(notice_id, payload):
             'received_at': received_at,
         })
     return rows
+
+
+PARTS_COLUMNS = (
+    ('fAssemblySort', '装配序号'),
+    ('fPartNumber', '零件编号'),
+    ('fPartName', '零件名称'),
+    ('fPartFigureNum', '零件图号'),
+    ('fMaterialName', '材料名称'),
+    ('fMaterialQuality', '材质'),
+    ('fAmount', '数量'),
+    ('fProcessNumber', '工序号'),
+    ('fProcessName', '工序名称'),
+    ('fRouting', '工艺路线'),
+    ('fToolingNo', '工装号'),
+    ('fRemarks', '备注'),
+)
+
+TOOLS_COLUMNS = (
+    ('fProcessNumber', '工序号'),
+    ('fProcessName', '工序名称'),
+    ('fPartName', '零件名称'),
+    ('fPartFigureNum', '零件图号'),
+    ('fProcessToolNo', '工艺工装号'),
+    ('fEquipment', '设备'),
+    ('fEquipmentCode', '设备编码'),
+    ('Estimated_working_hours', '预计工时'),
+    ('Process_Cost', '加工费'),
+    ('fRemarks', '备注'),
+)
+
+LINE_COLUMN_MAP = {'parts': PARTS_COLUMNS, 'tools': TOOLS_COLUMNS}
+LINE_ID_FIELDS = {
+    'parts': ('HEC_TechnologyTechnicsAndPart', 'MC_Technics_Part', 'PFE_Technics_Part'),
+    'tools': ('HEC_TechnologyTechnicsAndPart2',),
+}
+
+
+def flatten_cell(item):
+    if not isinstance(item, dict):
+        return {}
+    if any(isinstance(v, dict) and 'value' in v for v in item.values()):
+        return {k: (v.get('value') if isinstance(v, dict) and 'value' in v else v) for k, v in item.items()}
+    return item
+
+
+def parse_line_records(notice_id, kind, payload):
+    """Normalize parts/tools detail payloads into stored row dicts."""
+    columns = LINE_COLUMN_MAP[kind]
+    id_fields = LINE_ID_FIELDS[kind]
+    rows = []
+    if payload is None:
+        return rows
+    candidates = payload if isinstance(payload, list) else [payload]
+    for index, item in enumerate(candidates):
+        if not isinstance(item, dict):
+            continue
+        cell = flatten_cell(item)
+        source_key = pick(cell, *id_fields, 'source_key') or f'{notice_id}:{kind}:{index}'
+        cells = {key: pick(cell, key) for key, _label in columns}
+        if not any(cells.values()):
+            # Keep sparse source rows that still carry an identity / any text field.
+            extras = [clean(v) for v in cell.values() if v not in (None, '', {})]
+            if not extras:
+                continue
+            for key in cell:
+                text = pick(cell, key)
+                if text and key not in cells:
+                    cells[key] = text
+        rows.append({
+            'notice_id': notice_id,
+            'kind': kind,
+            'source_key': str(source_key)[:128],
+            'cells': cells,
+        })
+    return rows
+
+
+def line_columns(kind):
+    return [{'key': key, 'label': label} for key, label in LINE_COLUMN_MAP[kind]]
+
+
+def line_rows_from_stored(items):
+    return [{'source_key': item.source_key, **(item.cells or {})} for item in items]

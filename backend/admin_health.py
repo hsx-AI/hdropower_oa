@@ -83,6 +83,124 @@ except OSError: print('unreachable')
     except (OSError, ValueError, TypeError, StopIteration):
         return {'status': 'unknown', 'message': '无法读取源系统连接配置'}
 
+DETAIL_PROBE_TIMEOUT_SECONDS = int(os.environ.get('OA_DETAIL_PROBE_TIMEOUT_SECONDS', '20'))
+
+
+def detail_templates_status(engine):
+    """Passive readiness for click-to-open detail crawl; does not call the source."""
+    from .x5 import detail as detail_source
+    master_ok, master_reason = detail_source.template_ready()
+    parts_ok, parts_reason = detail_source.line_template_ready('parts')
+    tools_ok, tools_reason = detail_source.line_template_ready('tools')
+    sample_id = sample_code = None
+    try:
+        with Session(engine) as db:
+            notice = db.scalars(select(Notice).order_by(desc(Notice.execution_time), Notice.id).limit(1)).first()
+            if notice:
+                sample_id, sample_code = notice.id, notice.code
+    except Exception:
+        pass
+    if not master_ok:
+        status, message = 'error', '主单详情请求模板不可用，打开通知单时无法按需爬取'
+    elif not sample_id:
+        status, message = 'warning', '详情模板已就绪，但库内尚无通知单可供试探'
+    elif not (parts_ok and tools_ok):
+        status, message = 'warning', '主单详情模板已就绪；零件/工装模板尚未齐备'
+    else:
+        status, message = 'ok', '详情爬取模板已就绪（主单、零件、工装）；需点下方按钮才实测源查询'
+    return {
+        'status': status, 'message': message,
+        'master_template': master_ok, 'parts_template': parts_ok, 'tools_template': tools_ok,
+        'master_reason': None if master_ok else str(master_reason)[:160],
+        'parts_reason': None if parts_ok else str(parts_reason)[:160],
+        'tools_reason': None if tools_ok else str(tools_reason)[:160],
+        'sample_notice_id': sample_id, 'sample_notice_code': sample_code,
+    }
+
+
+def _probe_one(kind, fetch):
+    started = time.monotonic()
+    try:
+        records = fetch() or []
+        return {
+            'status': 'ok', 'record_count': len(records),
+            'latency_ms': round((time.monotonic() - started) * 1000),
+        }
+    except Exception as exc:
+        return {
+            'status': 'error', 'record_count': 0, 'error_type': type(exc).__name__,
+            'latency_ms': round((time.monotonic() - started) * 1000),
+        }
+
+
+def probe_notice_detail(engine, notice_id=None):
+    """Admin-triggered live probe: login+detail query for one notice; does not write results."""
+    from .x5 import detail as detail_source
+
+    if os.environ.get('OA_DETAIL_ON_DEMAND', '1') in ('0', 'false', 'False'):
+        return {'status': 'error', 'message': '已关闭按需详情同步（OA_DETAIL_ON_DEMAND）'}
+
+    templates = detail_templates_status(engine)
+    if not templates['master_template']:
+        return {
+            'status': 'error', 'message': templates['message'],
+            'templates': templates,
+        }
+
+    target_id = (notice_id or '').strip() or templates.get('sample_notice_id')
+    if not target_id:
+        return {'status': 'warning', 'message': '请填写通知单主键，或先同步至少一条通知单到库内',
+                'templates': templates}
+
+    code = None
+    try:
+        with Session(engine) as db:
+            notice = db.get(Notice, target_id)
+            if notice is None:
+                return {'status': 'error', 'message': '库内找不到该通知单，请确认主键 HEC_TechnologyOrder',
+                        'notice_id': target_id, 'templates': templates}
+            code = notice.code
+    except Exception:
+        return {'status': 'error', 'message': '无法从数据库读取通知单', 'notice_id': target_id}
+
+    timeout = max(5, min(DETAIL_PROBE_TIMEOUT_SECONDS, 60))
+    overrides = {'query_timeout_seconds': timeout, 'query_retries': 0}
+    started = time.monotonic()
+    master = _probe_one('detail', lambda: detail_source.fetch_detail(target_id, overrides=overrides))
+    parts = {'status': 'skipped', 'record_count': 0}
+    tools = {'status': 'skipped', 'record_count': 0}
+    if templates['parts_template']:
+        parts = _probe_one(
+            'parts', lambda: detail_source.fetch_line_items(target_id, 'parts', overrides=overrides),
+        )
+    if templates['tools_template']:
+        tools = _probe_one(
+            'tools', lambda: detail_source.fetch_line_items(target_id, 'tools', overrides=overrides),
+        )
+
+    statuses = [master['status'], parts['status'], tools['status']]
+    if master['status'] != 'ok':
+        overall = 'error'
+        message = f'主单详情查询失败（{master.get("error_type") or "错误"}）'
+    elif 'error' in statuses:
+        overall = 'warning'
+        message = '主单详情可通；零件或工装查询失败'
+    elif master['record_count'] == 0:
+        overall = 'warning'
+        message = '已连通源详情接口，但该单主表返回 0 条'
+    else:
+        overall = 'ok'
+        message = (
+            f'详情爬取联络正常：主单 {master["record_count"]} 条，'
+            f'零件 {parts.get("record_count", 0)} 条，工装 {tools.get("record_count", 0)} 条'
+        )
+    return {
+        'status': overall, 'message': message, 'notice_id': target_id, 'notice_code': code,
+        'latency_ms': round((time.monotonic() - started) * 1000),
+        'timeout_seconds': timeout, 'master': master, 'parts': parts, 'tools': tools,
+        'templates': templates, 'persisted': False,
+    }
+
 def sync_summary(runs, checked):
     latest = runs[0] if runs else None
     if not latest:
@@ -149,16 +267,22 @@ class HealthMonitor:
             clock = time.monotonic()
             if self.snapshot is not None and clock < self.expires:
                 return {**self.snapshot, 'cached': True, 'refresh_after_seconds': max(1, int(self.expires - clock))}
-            with ThreadPoolExecutor(max_workers=3) as pool:
+            with ThreadPoolExecutor(max_workers=4) as pool:
                 database = pool.submit(database_snapshot, engine)
                 services = pool.submit(system_services)
                 source = pool.submit(source_connection)
-                data, units, upstream = database.result(), services.result(), source.result()
-            statuses = [data['status'], data['sync']['status'], upstream['status'], *[s['status'] for s in units]]
+                detail = pool.submit(detail_templates_status, engine)
+                data, units, upstream, detail_ready = (
+                    database.result(), services.result(), source.result(), detail.result(),
+                )
+            statuses = [
+                data['status'], data['sync']['status'], upstream['status'], detail_ready['status'],
+                *[s['status'] for s in units],
+            ]
             overall = 'error' if 'error' in statuses else 'warning' if any(s != 'ok' for s in statuses) else 'ok'
             self.snapshot = {'checked_at': timestamp(now()), 'overall': overall,
                 'api': {'status': 'ok', 'message': '管理员接口已响应，登录与权限校验通过'},
-                'database': data, 'services': units, 'source': upstream,
+                'database': data, 'services': units, 'source': upstream, 'detail': detail_ready,
                 'check_interval_seconds': CACHE_SECONDS}
             self.expires = time.monotonic() + CACHE_SECONDS
             return {**self.snapshot, 'cached': False, 'refresh_after_seconds': CACHE_SECONDS}

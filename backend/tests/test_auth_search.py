@@ -87,6 +87,19 @@ def test_detail_content_payload(client):
     assert result['dispatch_pending'] is False
     assert result['detail_sync']['status'] in ('skipped', 'disabled', 'fresh', 'synced', 'failed', 'busy')
 
+def test_list_page_reads_projection_and_column_filters(client):
+    sign_in(client, 'reader')
+    page = client.get('/api/notices', params={'size': 20}).json()
+    assert page['total'] == 2
+    assert page['items'][0]['reason'] == '合成原因'
+    assert page['items'][0]['classification'] == '水轮发电机'
+    assert page['items'][0]['work_number'].startswith('WN-')
+    narrowed = client.get('/api/notices', params={'creator': '合成', 'kind': '工艺'}).json()
+    assert narrowed['total'] == 2
+    assert client.get('/api/notices', params={'code': 'TZ-A'}).json()['total'] == 1
+    assert client.get('/api/notices', params={'creator': '不存在的人'}).json()['total'] == 0
+
+
 def test_search_tokens_literal_wildcards_and_tracking_author(client):
     sign_in(client,'reader')
     result=client.get('/api/notices',params={'q':'尺寸 转轮'}).json()
